@@ -1011,7 +1011,10 @@ class FadanApp:
     def _build_help_tab(self, notebook):
         fh = ttk.Frame(notebook)
         notebook.add(fh, text="📖 帮助")
-        help_text = f"""{APP_TITLE} {APP_VERSION_DISPLAY} —— 使用说明
+        # 注意：这里故意用普通三引号字符串（不是 f-string），
+        # 因为文案里有多处「{xx}」「mm_xxx_xxx_xxx」这种带花括号的占位符，
+        # 写成 f-string 会被 Python 当作变量解析 → 直接炸（就是 v1.0.1 的 NameError: 'xx'）。
+        help_text = """__APP_TITLE__ __APP_VERSION_DISPLAY__ —— 使用说明
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【这个软件是干嘛的？】
@@ -1145,6 +1148,10 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
 • 软件 → 设置页最下方「在线升级配置」里填 GitHub 用户名 + 仓库名 → 保存
 • 以后新版本一出，软件自动检测 → 下载 → 替换 → 重启。
 """
+        # 把占位符替换成真实的软件名 + 版本号（比 f-string 安全，不会误解析 {xx} 等占位符）
+        help_text = (help_text
+                     .replace("__APP_TITLE__", str(APP_TITLE))
+                     .replace("__APP_VERSION_DISPLAY__", str(APP_VERSION_DISPLAY)))
         box = scrolledtext.ScrolledText(fh, width=130, height=30, font=("", 9))
         box.pack(fill="both", expand=True, padx=10, pady=10)
         box.insert("1.0", help_text)
