@@ -726,14 +726,61 @@ class FadanApp:
         # 默认选中第一个 Tab：监听跟单
         notebook.select(0)
 
-    # ---------- Tab1 配置 ----------
+    # ---------- Tab1 配置（可滚动 + NapCat 状态灯） ----------
     def _build_config_tab(self, notebook):
-        fc = ttk.Frame(notebook)
-        notebook.add(fc, text="⚙️ 配置")
+        # ===== 外层：可滚动容器（修复"配置页看不到底部按钮/无法滑动"的 bug）=====
+        outer = ttk.Frame(notebook)
+        notebook.add(outer, text="⚙️ 配置")
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+
+        # 真实内容 Frame（放在 canvas 里的窗口）
+        fc = ttk.Frame(canvas)
+        _fc_id = canvas.create_window((0, 0), window=fc, anchor="nw")
+
+        # 横版自适应 + 内容尺寸变化时更新滚动区域
+        def _on_fc_configure(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # 让内容宽度占满 canvas（窗口横向拉伸时控件随之扩展）
+            canvas.itemconfigure(_fc_id, width=canvas.winfo_width())
+
+        def _on_canvas_configure(_e=None):
+            canvas.itemconfigure(_fc_id, width=canvas.winfo_width())
+
+        fc.bind("<Configure>", _on_fc_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # 鼠标滚轮滚动（Windows/Mac 是 <MouseWheel>，Linux 是 <Button-4/5>）
+        def _on_mousewheel(e):
+            if e.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif e.num == 5:
+                canvas.yview_scroll(1, "units")
+            else:
+                canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        # 所有在 fc 上绑定的子控件收到滚轮时，也转发给 canvas（避免鼠标在输入框/文本框上滚不动）
+        def _bind_wheel_recursive(widget):
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                widget.bind(seq, _on_mousewheel, add="+")
+            for child in widget.winfo_children():
+                _bind_wheel_recursive(child)
+
+        # 稍后（fc 内容构建完）再递归绑一次滚动
+        self._config_wheel_binder = lambda: _bind_wheel_recursive(fc)
+
         # 让配置页内容随窗口拉伸（横版自适应）
         fc.columnconfigure(1, weight=1)
         fc.columnconfigure(2, weight=1)
         fc.columnconfigure(3, weight=1)
+        self._config_frame = fc       # 后面自动检测要用
+        self._config_canvas = canvas  # 绑定 Tab 切换回调要用
 
         # 折淘客
         ttk.Label(fc, text="── 折淘客 API 配置 ──",
@@ -762,9 +809,23 @@ class FadanApp:
         ttk.Label(fc, text="* SID在折淘客->授权管理页面查看；PID在淘宝联盟推广位查看；授权每30天需更新一次",
                   foreground="gray").grid(row=4, column=1, columnspan=3, sticky="w", padx=5)
 
-        # NapCat
-        ttk.Label(fc, text="── NapCat QQ机器人配置 ──",
-                  font=("", 10, "bold")).grid(row=5, column=0, columnspan=4, sticky="w", pady=(15, 5), padx=5)
+        # NapCat（标题行 + 右上角状态灯 + 重新检测按钮）
+        nap_title_row = ttk.Frame(fc)
+        nap_title_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(15, 5), padx=5)
+        ttk.Label(nap_title_row, text="── NapCat QQ机器人配置 ──",
+                  font=("", 10, "bold")).pack(side="left")
+        # 状态灯（Canvas 小圆点）+ 昵称文本
+        nap_status_row = ttk.Frame(nap_title_row)
+        nap_status_row.pack(side="right")
+        self.lbl_napcat_status_canvas = tk.Canvas(nap_status_row, width=16, height=16,
+                                                  highlightthickness=0, bg=nap_status_row["bg"])
+        self.lbl_napcat_status_canvas.pack(side="left", padx=(0, 4))
+        # 默认先画一个灰色圆（稍后启动后自动检测更新）
+        self._draw_napcat_led("gray")
+        self.lbl_napcat_status = ttk.Label(nap_status_row, text="状态：未检测", foreground="#6B7280")
+        self.lbl_napcat_status.pack(side="left", padx=(0, 8))
+        ttk.Button(nap_status_row, text="🔄 重新检测",
+                   command=self.refresh_napcat_status_ui).pack(side="left")
 
         ttk.Label(fc, text="NapCat地址:").grid(row=6, column=0, sticky="e", padx=5, pady=3)
         self.entry_napcat_host = ttk.Entry(fc, width=32)
@@ -895,6 +956,25 @@ class FadanApp:
                    ).pack(side="left", padx=10)
         ttk.Button(frame_btns, text="📋 获取NapCat群列表", command=self.list_napcat_groups
                    ).pack(side="left", padx=10)
+
+        # ===== 配置页构建完成：绑定鼠标滚轮滚动 + 注册 Tab 切换回调 =====
+        if getattr(self, "_config_wheel_binder", None):
+            self._config_wheel_binder()
+
+        # 切换到「配置」Tab 时自动检测一次 NapCat 状态
+        def _on_tab_changed(_e=None):
+            try:
+                idx = self.notebook.index("current")
+                tab_text = self.notebook.tab(idx, "text")
+                if tab_text.startswith("⚙️"):
+                    # 切回主线程再检测，避免事件回调里阻塞
+                    self.root.after(100, self.refresh_napcat_status_ui)
+            except Exception:
+                pass
+
+        self.notebook.bind("<<NotebookTabChanged>>", _on_tab_changed)
+        # 构建完 UI 后顺手做一次初始检测（后台线程，防止启动慢）
+        self.root.after(600, self.refresh_napcat_status_ui)
 
     # ---------- Tab2 监听跟单（首页） ----------
     def _build_monitor_tab(self, notebook):
@@ -1252,17 +1332,73 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
             self.log(f"❌ 京东联盟转链失败：{r.get('error') or '未返回推广链接'}")
             self.log("   常见原因：① 4个信息填错 ② 应用未审核通过 ③ positionId 不属于你当前 unionId")
 
+    # ================================================================
+    # NapCat 状态灯 + 连接检测辅助方法（v1.0.3 新增）
+    # ================================================================
+    def _draw_napcat_led(self, color):
+        """在配置页 NapCat 标题栏右侧画一个 12px 的圆形状态灯"""
+        canvas = getattr(self, "lbl_napcat_status_canvas", None)
+        if canvas is None:
+            return
+        canvas.delete("all")
+        try:
+            canvas.create_oval(2, 2, 14, 14, fill=color, outline="")
+        except Exception:
+            pass
+
+    def _make_sender(self):
+        """从当前输入框/配置里拼出 NapCatSender（统一入口，避免四处重复 new）"""
+        try:
+            host = self.entry_napcat_host.get().strip() or self.config.get("napcat_host", "127.0.0.1")
+            port_s = self.entry_napcat_port.get().strip() if hasattr(self, "entry_napcat_port") else ""
+            port = int(port_s or self.config.get("napcat_port") or 3000)
+            token = self.entry_napcat_token.get().strip() if hasattr(self, "entry_napcat_token") else ""
+            return NapCatSender(host, port, token)
+        except Exception:
+            # 极端情况：输入框还没创建 → 用 config 默认值兜底
+            return NapCatSender(self.config.get("napcat_host", "127.0.0.1"),
+                                int(self.config.get("napcat_port") or 3000),
+                                self.config.get("napcat_token", ""))
+
+    def refresh_napcat_status_ui(self):
+        """后台检测 NapCat 是否在线并刷新状态灯，不阻塞 UI"""
+        def _do():
+            # 先把当前输入框的值刷进 sender（用户可能刚改了 Host/Port，还没保存）
+            sender = self._make_sender()
+            try:
+                ok, name = sender.check_connection()
+            except Exception:
+                ok, name = False, None
+            # 网络请求在后台线程完成，再切回主线程更新 UI
+            def _apply():
+                if ok:
+                    self._draw_napcat_led("#22C55E")  # 绿
+                    display = name or "（未返回昵称）"
+                    self.lbl_napcat_status.configure(
+                        text=f"🟢 在线：{display}", foreground="#15803D")
+                else:
+                    self._draw_napcat_led("#9CA3AF")  # 灰
+                    self.lbl_napcat_status.configure(
+                        text="⚪ 未连接（检查 NapCat 是否已启动 + 扫码登录）",
+                        foreground="#6B7280")
+            try:
+                self.root.after(0, _apply)
+            except Exception:
+                pass
+
+        threading.Thread(target=_do, name="refresh-napcat-ui", daemon=True).start()
+
     def test_napcat(self):
         self.save_config()
         self.log("🤖 正在测试NapCat连接...")
-        sender = NapCatSender(self.config["napcat_host"],
-                              int(self.config["napcat_port"] or 3000),
-                              self.config["napcat_token"])
+        sender = self._make_sender()
         ok, name = sender.check_connection()
         if ok:
             self.log(f"✅ NapCat连接成功！当前登录账号: {name}")
         else:
             self.log("❌ NapCat连接失败。请确认 NapCat 已启动、已登录、HTTP端口正确。")
+        # 同步刷新顶部状态灯
+        self.refresh_napcat_status_ui()
 
     def list_napcat_groups(self):
         """工具：拿到NapCat里的群列表，方便用户填群号"""
