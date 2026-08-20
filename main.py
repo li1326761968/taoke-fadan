@@ -818,7 +818,9 @@ class FadanApp:
         nap_status_row = ttk.Frame(nap_title_row)
         nap_status_row.pack(side="right")
         self.lbl_napcat_status_canvas = tk.Canvas(nap_status_row, width=16, height=16,
-                                                  highlightthickness=0, bg=nap_status_row["bg"])
+                                                  highlightthickness=0,
+                                                  bg=nap_status_row.winfo_toplevel().cget("bg")
+                                                  if nap_status_row.winfo_toplevel() else "#F0F0F0")
         self.lbl_napcat_status_canvas.pack(side="left", padx=(0, 4))
         # 默认先画一个灰色圆（稍后启动后自动检测更新）
         self._draw_napcat_led("gray")
