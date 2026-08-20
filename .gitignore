@@ -1,0 +1,26 @@
+# Python 临时
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+venv/
+.venv/
+env/
+
+# PyInstaller 构建产物
+build/
+dist/
+*.spec
+
+# 本地源码包 & 大打包临时
+猪儿虫发单软件-源码包.zip
+猪儿虫发单软件.zip
+
+# 配置文件（含私密信息，默认不入库）
+config.json
+*.bak
+*.old
+
+# 日志
+*.log

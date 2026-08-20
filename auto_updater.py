@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import time
+import socket
 import tempfile
 import subprocess
 import urllib.request
@@ -19,6 +20,14 @@ import urllib.error
 
 # 当前版本号（每次发布新版时改这里）
 APP_VERSION = "1.0.7"
+
+# 后台调试日志开关：在 main.py 里可被覆盖为 self.log
+def _dbg(msg):
+    """后台线程的调试输出，方便排查网络卡顿"""
+    try:
+        print(f"[updater] {msg}")
+    except Exception:
+        pass
 
 
 def get_update_info(github_owner="", github_repo=""):
@@ -33,13 +42,20 @@ def get_update_info(github_owner="", github_repo=""):
         }
 
     api_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/releases/latest"
+    _dbg(f"开始请求 GitHub API: {api_url}")
+    # 兜底：socket 全局超时，避免 DNS 解析阶段卡死（urlopen 的 timeout 对 DNS 不生效）
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(12)
     try:
         req = urllib.request.Request(api_url, headers={
             "User-Agent": "taoke-fadan-updater",
             "Accept": "application/vnd.github+json"
         })
-        resp = urllib.request.urlopen(req, timeout=15)
+        _dbg("正在连接 api.github.com ...")
+        resp = urllib.request.urlopen(req, timeout=10)
+        _dbg("连接成功，正在读取响应...")
         data = json.loads(resp.read().decode("utf-8"))
+        _dbg("响应解析完成")
 
         remote_version = (data.get("tag_name") or "").lstrip("v")
         release_notes = data.get("body", "")
@@ -72,15 +88,41 @@ def get_update_info(github_owner="", github_repo=""):
             "download_size": exe_size,
         }
     except urllib.error.HTTPError as e:
+        _dbg(f"GitHub 返回 HTTP {e.code}")
+        # 403 速率限制：读取 reset 时间，告诉用户还要等多久
+        if e.code == 403:
+            reset_ts = e.headers.get("X-RateLimit-Reset")
+            remaining = e.headers.get("X-RateLimit-Remaining")
+            hint = "GitHub 速率限制（未登录每小时只能查 60 次）"
+            if reset_ts:
+                try:
+                    wait = max(0, int(reset_ts) - int(time.time()))
+                    if wait > 0:
+                        m, s = divmod(wait, 60)
+                        hint += f"，请约 {m} 分 {s} 秒后再试"
+                except Exception:
+                    pass
+            if remaining == "0":
+                hint += "\n（你和他人共享同一出口IP时容易被刷满，建议挂VPN或稍后再试）"
+            return False, {"error": f"GitHub 拒绝请求 (403): {hint}"}
         if e.code == 404:
             return False, {
                 "error": "GitHub 仓库或 Release 不存在（404）。请确认：1)仓库是public 2)已创建Release并上传了.exe"
             }
         return False, {"error": f"GitHub API 返回 HTTP {e.code}: {e.reason}"}
     except urllib.error.URLError as e:
+        reason = str(e.reason)
+        _dbg(f"网络连接失败: {reason}")
+        # 区分超时和其它网络问题
+        rl = reason.lower()
+        if "timed out" in rl or "timeout" in rl:
+            return False, {"error": "连接 GitHub 超时（国内访问 api.github.com 经常很慢或被墙）"}
         return False, {"error": f"网络连接失败: {e.reason}"}
     except Exception as e:
+        _dbg(f"未知异常: {e}")
         return False, {"error": str(e)}
+    finally:
+        socket.setdefaulttimeout(old_timeout)
 
 
 def _compare_version(v1, v2):
@@ -110,6 +152,9 @@ def download_update(exe_url, progress_callback=None):
       传 (−1, −1) 表示出错
     返回临时文件路径，失败返回 None
     """
+    _dbg(f"开始下载: {exe_url}")
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(60)  # 兜底：避免长时间无任何 socket 活动时卡死
     try:
         temp_dir = tempfile.gettempdir()
         temp_path = os.path.join(temp_dir, "taoke_fadan_update.exe")
@@ -117,9 +162,11 @@ def download_update(exe_url, progress_callback=None):
         req = urllib.request.Request(exe_url, headers={
             "User-Agent": "taoke-fadan-updater"
         })
-        resp = urllib.request.urlopen(req, timeout=60)
+        _dbg("正在连接下载源...")
+        resp = urllib.request.urlopen(req, timeout=30)
 
         total = int(resp.headers.get("Content-Length", 0))
+        _dbg(f"文件大小: {total} 字节")
         downloaded = 0
         chunk_size = 65536
 
@@ -133,11 +180,15 @@ def download_update(exe_url, progress_callback=None):
                 if progress_callback and total > 0:
                     progress_callback(downloaded, total)
 
+        _dbg(f"下载完成: {downloaded} 字节")
         return temp_path
     except Exception as e:
+        _dbg(f"下载异常: {e}")
         if progress_callback:
             progress_callback(-1, -1)
         return None
+    finally:
+        socket.setdefaulttimeout(old_timeout)
 
 
 def apply_update(temp_exe_path):

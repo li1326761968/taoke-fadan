@@ -1,14 +1,11 @@
 """
-淘客全自动发单助手 v1.0
+猪儿虫发单软件 v1.0
 主程序 + GUI界面
 
-功能：
-1. 从折淘客API获取高佣商品（高佣/9.9/销量榜/高评分）
-2. 自动转链 + 生成淘口令
-3. 生成发单文案（4种模板）
-4. 通过NapCat发送到QQ群（文本+图片合并为一条，防拆条风控）
-5. 定时循环发单 + 商品去重
-6. 监听跟单：监听上家群消息→自动转链→转发到自己群
+核心用途：
+  监听一个"上家主群"里的商品消息 → 自动抓到淘口令/京东口令/链接/商品ID
+  → 调用折淘客 / 京东联盟 API 转成你自己的推广链（赚你的佣金）
+  → 批量转发到你自己的 N 个 QQ 发单群
 """
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog
@@ -100,20 +97,22 @@ DEFAULT_CONFIG = {
 }
 
 
+APP_TITLE = "猪儿虫发单软件"
+APP_VERSION_DISPLAY = "v1.0"
+
+
 class FadanApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("淘客全自动发单助手 v1.0")
+        self.root.title(f"{APP_TITLE} {APP_VERSION_DISPLAY}")
         self.root.geometry("1120x700")
         self.root.resizable(True, True)
         self.root.minsize(960, 600)
 
-        self.config = self.load_config()
+        # 猪猪侠图标：优先用本地 ICO；失败就用 canvas 画一个占位的 32x32 猪头图标
+        self._setup_app_icon()
 
-        # 发单
-        self.is_running = False
-        self.thread = None
-        self.sent_count = 0
+        self.config = self.load_config()
 
         # 跟单监听
         self.monitor = None
@@ -122,12 +121,138 @@ class FadanApp:
         # 跟单去重：已成功转发过的"特征串"，避免重复转链
         self._monitor_used_keys = set()
 
+        # KPI 计数（今日）
+        self.kpi_forward_ok = 0   # 已转发（至少一个群成功）
+        self.kpi_convert_fail = 0  # 转链失败次数
+        self.kpi_forbidden_hit = 0  # 命中违禁词跳过次数
+
         # 激活码检查（未激活则弹框要求输入）
         if not self._check_activation():
             self.root.destroy()
             sys.exit(0)
 
         self.setup_ui()
+
+    # =========================================================
+    # 图标
+    # =========================================================
+    def _setup_app_icon(self):
+        """
+        设置窗口图标。优先级：
+          1) Windows 打包后：icon.ico（任务栏、EXE 统一）
+          2) 运行态：icon_64x64.png / icon.png 用 iconphoto 塞进窗口
+          3) 资源都不存在：用 Canvas 画个 32x32 的粉色小猪头占位，保证一定有图标
+        """
+        # 资源路径：支持 源码运行（./assets/）和 PyInstaller 打包（sys._MEIPASS/assets/）
+        def _res(rel):
+            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            return os.path.join(base, "assets", rel)
+
+        # 1. ico（仅 Windows）
+        ico_path = _res("icon.ico")
+        if os.path.exists(ico_path):
+            try:
+                self.root.iconbitmap(ico_path)
+            except Exception:
+                pass
+
+        # 2. PNG（iconphoto 兼容性好，跨平台）
+        photo = None
+        for size in (64, 48, 32, 256):
+            png_path = _res(f"icon_{size}x{size}.png")
+            if not os.path.exists(png_path):
+                continue
+            try:
+                photo = tk.PhotoImage(file=png_path)
+                self.root.iconphoto(True, photo)
+                # 把 PhotoImage 挂到实例上防 GC
+                self._app_icon_photo = photo
+                return
+            except Exception:
+                continue
+
+        # 兜底：找 icon.png
+        png_path = _res("icon.png")
+        if os.path.exists(png_path):
+            try:
+                photo = tk.PhotoImage(file=png_path)
+                self.root.iconphoto(True, photo)
+                self._app_icon_photo = photo
+                return
+            except Exception:
+                pass
+
+        # 3. 终极兜底：用 Canvas 画一个 32x32 的粉色猪头
+        try:
+            self._draw_fallback_icon()
+        except Exception:
+            pass
+
+    def _draw_fallback_icon(self):
+        """用 Tk 自己的 Canvas 画一个 32x32 粉色小猪图标并塞进 iconphoto"""
+        # 存到临时 PNG
+        try:
+            import base64, zlib, struct, io
+            # 32x32 粉色小猪（程序化 PPM 编码 → PhotoImage 支持 PPM）
+            # 直接用 PhotoImage 的 width/height/put 方式画像素更灵活
+            size = 32
+            bg = ""
+            def rgb(c): return c
+            # 粉色圆脸 + 两耳朵 + 红斗篷领
+            img_data = []
+            for y in range(size):
+                row = []
+                for x in range(size):
+                    # 背景透明，用白色
+                    # 归一化到 0..1
+                    cx, cy = 15.5, 17.0
+                    dx, dy = x - cx, y - cy
+                    dist = (dx*dx + dy*dy) ** 0.5
+                    # 脸
+                    if dist < 10.5:
+                        row.append("#FFB6C1")  # 粉色
+                    # 左耳
+                    elif (x-7)**2 + (y-10)**2 < 3.6**2:
+                        row.append("#FF9EB0")
+                    # 右耳
+                    elif (x-24)**2 + (y-10)**2 < 3.6**2:
+                        row.append("#FF9EB0")
+                    # 眼睛（左）
+                    elif abs(x-12) < 1.4 and abs(y-15) < 1.7:
+                        row.append("#000000")
+                    # 眼睛（右）
+                    elif abs(x-19) < 1.4 and abs(y-15) < 1.7:
+                        row.append("#000000")
+                    # 鼻子
+                    elif abs(x-15.5) < 3 and abs(y-19) < 2:
+                        row.append("#FF7F95")
+                    # 鼻孔
+                    elif (x-14)**2 + (y-19)**2 < 0.8**2:
+                        row.append("#331111")
+                    elif (x-17)**2 + (y-19)**2 < 0.8**2:
+                        row.append("#331111")
+                    # 嘴
+                    elif abs(y-23) < 0.8 and 12 <= x <= 19:
+                        row.append("#CC2233")
+                    # 红色小斗篷（下方一小段弧形）
+                    elif 25 <= y <= 27 and 4 <= x <= 27:
+                        arc_dy = y - 17.5
+                        rr = 16
+                        want = abs((x-cx)**2 + arc_dy*arc_dy - rr*rr)
+                        if want < 10:
+                            row.append("#E61A27")
+                        else:
+                            row.append("#FFFFFF")
+                    else:
+                        row.append("#FFFFFF")
+                img_data.append(" ".join(row))
+            img_str = " ".join(img_data)
+            photo = tk.PhotoImage(width=size, height=size)
+            photo.put(img_str)
+            self.root.iconphoto(True, photo)
+            self._app_icon_photo = photo
+        except Exception:
+            pass
 
     # =========================================================
     # 配置读写
@@ -153,35 +278,8 @@ class FadanApp:
         self.config["napcat_host"] = self.entry_napcat_host.get()
         self.config["napcat_port"] = self.entry_napcat_port.get()
         self.config["napcat_token"] = self.entry_napcat_token.get()
-        # 发单群
-        self.config["group_ids"] = self.entry_groups.get()
-        # 规则
-        try:
-            self.config["interval"] = int(self.entry_interval.get() or 300)
-        except ValueError:
-            self.config["interval"] = 300
-        try:
-            self.config["min_commission"] = int(self.entry_min_commission.get() or 50)
-        except ValueError:
-            self.config["min_commission"] = 50
-        try:
-            self.config["min_sales"] = int(self.entry_min_sales.get() or 0)
-        except ValueError:
-            self.config["min_sales"] = 0
-        try:
-            self.config["min_price"] = float(self.entry_min_price.get() or 0)
-        except ValueError:
-            self.config["min_price"] = 0.0
-        try:
-            self.config["max_price"] = float(self.entry_max_price.get() or 9999)
-        except ValueError:
-            self.config["max_price"] = 9999.0
-
-        self.config["template_id"] = self.combo_template.current() + 1
-        self.config["source_type"] = self.combo_source.get()
-        self.config["send_image"] = self.var_image.get()
-        self.config["random_delay"] = self.var_random_delay.get()
-        self.config["auto_loop"] = self.var_auto_loop.get()
+        # 发单群（保留字段兼容历史配置；实际使用的是 monitor_target_groups）
+        self.config["group_ids"] = getattr(self, "entry_groups", None) and self.entry_groups.get() or self.config.get("group_ids", "")
 
         # 跟单监听
         self.config["monitor_source_group"] = self.entry_monitor_source_group.get()
@@ -292,22 +390,6 @@ class FadanApp:
         _set_entry("entry_napcat_host", "napcat_host", "127.0.0.1")
         _set_entry("entry_napcat_port", "napcat_port", "3000")
         _set_entry("entry_napcat_token", "napcat_token", "")
-        # 配置页 - 发单目标群
-        _set_entry("entry_groups", "group_ids", "")
-        # 配置页 - 发单规则
-        _set_entry("entry_interval", "interval", 600)
-        _set_entry("entry_min_commission", "min_commission", 30)
-        _set_entry("entry_min_sales", "min_sales", 100)
-        _set_entry("entry_min_price", "min_price", 0)
-        _set_entry("entry_max_price", "max_price", 9999)
-        _set_combo("combo_source", "source_type", "high_commission")
-        try:
-            self.combo_template.current(max(0, int(self.config.get("template_id", 1)) - 1))
-        except Exception:
-            pass
-        _set_var("var_image", "send_image", True)
-        _set_var("var_random_delay", "random_delay", True)
-        _set_var("var_auto_loop", "auto_loop", True)
         # 配置页 - 京东联盟
         _set_entry("entry_jd_app_key", "jd_app_key", "")
         _set_entry("entry_jd_app_secret", "jd_app_secret", "")
@@ -346,9 +428,13 @@ class FadanApp:
     # 在线升级
     # =========================================================
     def check_update(self):
-        """检查 GitHub Releases 是否有新版本；有则弹框确认下载并自动替换重启"""
+        """检查 GitHub Releases 是否有新版本（后台线程，不卡界面）"""
         if get_update_info is None:
             messagebox.showerror("升级模块不可用", "auto_updater 模块加载失败，请重新打包。")
+            return
+        # 防重复点击：先判断，避免每次点击都打印"正在检查"造成误导
+        if getattr(self, '_checking_update', False):
+            self.log("⏳ 正在检查中，请稍候（网络慢时最多等 15 秒）...")
             return
         self.save_config(silent=True)
         owner = self.config.get("github_owner", "").strip()
@@ -357,19 +443,55 @@ class FadanApp:
             messagebox.showwarning(
                 "未配置升级地址",
                 "请先在配置页「在线升级配置」里填写你的 GitHub 用户名和仓库名，\n"
-                "然后保存再点检查更新。\n\n"
-                "注册流程：\n"
-                "1. 打开 github.com 注册免费账号\n"
-                "2. 点 New repository 创建一个 public 仓库\n"
-                "3. 把仓库名填到配置页（用户名和仓库名）"
+                "然后保存再点检查更新。"
             )
             return
-        self.log(f"🔄 正在检查更新（{owner}/{repo}）...")
-        self.root.update()
-        has_update, info = get_update_info(owner, repo)
+        self._checking_update = True
+        self.log(f"🔄 正在检查更新（{owner}/{repo}），最多等 15 秒...")
+
+        def _do_check():
+            """后台线程：检查更新"""
+            try:
+                has_update, info = get_update_info(owner, repo)
+            except Exception as e:
+                has_update, info = False, {"error": str(e)}
+            # 回到主线程处理结果
+            self.root.after(0, lambda: self._on_check_update_done(has_update, info))
+
+        threading.Thread(target=_do_check, daemon=True).start()
+
+        # 总超时兜底：15 秒后若后台还没回来，主动提示（防止 DNS 卡死时用户干等）
+        def _timeout_fallback():
+            if getattr(self, '_checking_update', False):
+                self._checking_update = False
+                self.log("⏰ 检查更新超时：连接 GitHub 超过 15 秒仍无响应")
+                messagebox.showerror(
+                    "检查更新超时",
+                    "连接 GitHub 超过 15 秒仍无响应。\n\n"
+                    "常见原因：\n"
+                    "1. 国内访问 api.github.com 经常被墙或 DNS 被污染\n"
+                    "2. 你和他人共享出口 IP，GitHub 速率限制（每小时 60 次）已用完\n\n"
+                    "解决办法：\n"
+                    "• 挂 VPN / 加速器后重试\n"
+                    "• 等 10-60 分钟再试\n"
+                    "• 或直接去 GitHub 网页下载最新版覆盖安装"
+                )
+        self._update_timeout_id = self.root.after(15000, _timeout_fallback)
+
+    def _on_check_update_done(self, has_update, info):
+        """检查更新完成后的回调（主线程）"""
+        self._checking_update = False
+        # 取消总超时兜底定时器（后台已正常返回）
+        if hasattr(self, '_update_timeout_id'):
+            try:
+                self.root.after_cancel(self._update_timeout_id)
+            except Exception:
+                pass
+            del self._update_timeout_id
         if "error" in info:
-            self.log(f"❌ 检查更新失败: {info['error']}")
-            messagebox.showerror("检查更新失败", info["error"])
+            err = info["error"]
+            self.log(f"❌ 检查更新失败: {err}")
+            messagebox.showerror("检查更新失败", f"{err}\n\n可能原因：\n1. 网络不通，试试挂VPN或加速器\n2. GitHub 被限流，等几分钟再试\n3. 仓库未设为public")
             return
         if not has_update:
             self.log(f"✅ 当前已是最新版本 v{info.get('current_version', APP_VERSION)}")
@@ -390,26 +512,38 @@ class FadanApp:
             self.log("⏭️ 用户取消了升级")
             return
 
-        # 下载
+        # 后台下载
         self.log(f"📥 正在下载新版本 v{remote_ver}（{size_mb:.1f}MB）...")
+        exe_url = info["exe_url"]
 
-        def progress_cb(done, total):
-            if done < 0:
-                return
-            pct = done * 100 // total if total > 0 else 0
-            if pct % 20 == 0:
-                self.log(f"   下载进度: {pct}% ({done//1024}KB/{total//1024}KB)")
+        def _do_download():
+            """后台线程：下载新版本"""
+            def progress_cb(done, total):
+                if done < 0:
+                    return
+                pct = done * 100 // total if total > 0 else 0
+                if pct % 20 == 0:
+                    self.root.after(0, lambda: self.log(f"   下载进度: {pct}% ({done//1024}KB/{total//1024}KB)"))
 
-        temp_path = download_update(info["exe_url"], progress_callback=progress_cb)
+            temp_path = download_update(exe_url, progress_callback=progress_cb)
+            if not temp_path:
+                self.root.after(0, lambda: self._on_download_done(None))
+            else:
+                self.root.after(0, lambda: self._on_download_done(temp_path))
+
+        threading.Thread(target=_do_download, daemon=True).start()
+
+    def _on_download_done(self, temp_path):
+        """下载完成回调（主线程）"""
         if not temp_path:
             self.log("❌ 下载失败，请检查网络后重试")
-            messagebox.showerror("下载失败", "下载新版本失败，请检查网络连接。")
+            messagebox.showerror("下载失败", "下载新版本失败，请检查网络连接。\n\n如果GitHub下载慢，可以挂VPN或加速器。")
             return
         self.log("✅ 下载完成，正在替换并重启...")
         ok, msg2 = apply_update(temp_path)
         if ok:
             self.log(f"✅ {msg2}")
-            self.root.destroy()  # 退出当前程序，让 .bat 完成替换+重启
+            self.root.destroy()
         else:
             self.log(f"❌ {msg2}")
             messagebox.showerror("升级失败", msg2)
@@ -433,7 +567,7 @@ class FadanApp:
     def _show_activation_dialog(self):
         """显示激活码输入对话框，成功返回 True"""
         dialog = tk.Toplevel(self.root)
-        dialog.title("软件激活 - 淘客全自动发单助手")
+        dialog.title(f"软件激活 - {APP_TITLE}")
         dialog.geometry("480x320")
         dialog.resizable(False, False)
         dialog.transient(self.root)
@@ -452,7 +586,7 @@ class FadanApp:
                  font=("", 16, "bold")).pack(pady=(25, 10))
 
         tk.Label(dialog,
-                 text="欢迎使用淘客全自动发单助手\n请输入激活码以激活软件",
+                 text=f"欢迎使用{APP_TITLE}\n请输入激活码以激活软件",
                  font=("", 10), fg="gray", justify="center").pack(pady=(0, 15))
 
         # 激活码输入框
@@ -515,29 +649,82 @@ class FadanApp:
     # UI
     # =========================================================
     def setup_ui(self):
-        # 顶部全局工具栏（刷新全局按钮放这里，所有Tab都看得到）
+        # 顶部全局工具栏 + KPI 状态栏（两行）
         topbar = ttk.Frame(self.root)
         topbar.pack(fill="x", padx=10, pady=(5, 0))
-        ttk.Label(topbar, text="淘客全自动发单助手 v1.0",
-                  font=("", 10, "bold")).pack(side="left")
+        ttk.Label(topbar, text=f"🐷 {APP_TITLE}  {APP_VERSION_DISPLAY}",
+                  font=("", 11, "bold")).pack(side="left")
+
+        # --- 右侧：操作按钮 ---
         ttk.Button(topbar, text="🔑 重新激活",
                    command=self._reactivate).pack(side="right", padx=(5, 0))
         ttk.Button(topbar, text="🔄 刷新全局",
                    command=self.refresh_all).pack(side="right", padx=(5, 0))
         ttk.Button(topbar, text="💾 保存配置",
                    command=self.save_config).pack(side="right", padx=(5, 0))
-        ttk.Button(topbar, text="🔄 检查更新",
-                   command=self.check_update).pack(side="right", padx=(5, 0))
-        ttk.Label(topbar, text=f"v{APP_VERSION}",
-                  foreground="gray").pack(side="right", padx=(5, 0))
+
+        # --- 第二行：KPI 状态栏 ---
+        kpibar = tk.Frame(self.root, bg="#F7F7F8")
+        kpibar.pack(fill="x", padx=10, pady=(0, 0))
+        try:
+            kpibar.configure(bg="#F7F7F8")  # 浅色背景，让 KPI 卡片更显眼
+        except Exception:
+            pass
+
+        # 监听状态灯
+        self.lbl_mon_status_light = tk.Label(
+            kpibar, text="  监听：未启动  ",
+            bg="#EFEFF2", fg="#52525B",
+            font=("", 9, "bold"), padx=8, pady=3
+        )
+        self.lbl_mon_status_light.pack(side="left", padx=(0, 10), pady=4)
+
+        def _kpi_card(parent, label, value_var_name, fg="#171717"):
+            card = tk.Frame(parent, bg="#FFFFFF", bd=1, relief="solid",
+                            highlightbackground="#E5E5E5", highlightthickness=1)
+            card.pack(side="left", padx=3, pady=4)
+            tk.Label(card, text=label, bg="#FFFFFF", fg="#52525B",
+                     font=("", 9)).pack(side="top", padx=10, pady=(2, 0))
+            lbl = tk.Label(card, text="0", bg="#FFFFFF", fg=fg,
+                           font=("", 13, "bold"))
+            lbl.pack(side="top", padx=10, pady=(0, 2))
+            setattr(self, value_var_name, lbl)
+            return card
+
+        _kpi_card(kpibar, "今日转发（成功）", "lbl_kpi_forward", "#1DC981")
+        _kpi_card(kpibar, "转链失败", "lbl_kpi_convert_fail", "#E8463A")
+        _kpi_card(kpibar, "命中违禁词", "lbl_kpi_forbidden", "#EFAA17")
+
+        # KPI 栏最右侧：一键启动 / 停止 / 测试解析（大号强调按钮，任何 Tab 都能看到）
+        self.btn_topbar_start = tk.Button(kpibar, text="▶️ 启动监听",
+                                          bg="#16A34A", fg="white",
+                                          activebackground="#15803D", activeforeground="white",
+                                          font=("", 10, "bold"), padx=14, pady=4, bd=0,
+                                          cursor="hand2", relief="flat",
+                                          command=self.start_monitor)
+        self.btn_topbar_start.pack(side="right", padx=4, pady=4)
+
+        self.btn_topbar_stop = tk.Button(kpibar, text="⏹️ 停止监听",
+                                         bg="#9CA3AF", fg="white",
+                                         activebackground="#6B7280", activeforeground="white",
+                                         font=("", 10, "bold"), padx=14, pady=4, bd=0,
+                                         cursor="hand2", relief="flat",
+                                         state="disabled", command=self.stop_monitor)
+        self.btn_topbar_stop.pack(side="right", padx=4, pady=4)
+
+        ttk.Button(kpibar, text="🧪 测试解析",
+                   command=self.test_monitor_parse).pack(side="right", padx=4, pady=4)
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True, padx=10, pady=5)
 
-        self._build_config_tab(notebook)
-        self._build_run_tab(notebook)
+        # 顺序：监听跟单（首页） / 参数设置 / 帮助
+        self.notebook = notebook
         self._build_monitor_tab(notebook)
+        self._build_config_tab(notebook)
         self._build_help_tab(notebook)
+        # 默认选中第一个 Tab：监听跟单
+        notebook.select(0)
 
     # ---------- Tab1 配置 ----------
     def _build_config_tab(self, notebook):
@@ -594,122 +781,52 @@ class FadanApp:
         self.entry_napcat_token.grid(row=7, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
         self.entry_napcat_token.insert(0, self.config["napcat_token"])
 
-        # QQ群
-        ttk.Label(fc, text="── 发单目标群配置 ──",
-                  font=("", 10, "bold")).grid(row=8, column=0, columnspan=4, sticky="w", pady=(15, 5), padx=5)
-
-        ttk.Label(fc, text="QQ群号:").grid(row=9, column=0, sticky="e", padx=5, pady=3)
-        grp_frame = ttk.Frame(fc)
-        grp_frame.grid(row=9, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
-        self.entry_groups = ttk.Entry(grp_frame)
-        self.entry_groups.pack(side="left", fill="x", expand=True)
-        self.entry_groups.insert(0, self.config["group_ids"])
-        ttk.Button(grp_frame, text="📋 选择群",
-                   command=lambda: self.open_group_picker(self.entry_groups, "选择发单目标群")
-                   ).pack(side="left", padx=(5, 0))
-
-        ttk.Label(fc, text="多个群用英文逗号分隔，或点「选择群」自动获取群列表",
-                  foreground="gray").grid(row=10, column=1, columnspan=3, sticky="w", padx=5)
-
-        # 发单规则
-        ttk.Label(fc, text="── 发单规则 ──",
-                  font=("", 10, "bold")).grid(row=11, column=0, columnspan=4, sticky="w", pady=(15, 5), padx=5)
-
-        ttk.Label(fc, text="发单间隔(秒):").grid(row=12, column=0, sticky="e", padx=5, pady=3)
-        self.entry_interval = ttk.Entry(fc, width=10)
-        self.entry_interval.grid(row=12, column=1, sticky="w", padx=5, pady=3)
-        self.entry_interval.insert(0, str(self.config["interval"]))
-
-        ttk.Label(fc, text="最低佣金%:").grid(row=12, column=2, sticky="e", padx=5, pady=3)
-        self.entry_min_commission = ttk.Entry(fc, width=10)
-        self.entry_min_commission.grid(row=12, column=3, sticky="w", padx=5, pady=3)
-        self.entry_min_commission.insert(0, str(self.config["min_commission"]))
-
-        ttk.Label(fc, text="最低销量:").grid(row=13, column=0, sticky="e", padx=5, pady=3)
-        self.entry_min_sales = ttk.Entry(fc, width=10)
-        self.entry_min_sales.grid(row=13, column=1, sticky="w", padx=5, pady=3)
-        self.entry_min_sales.insert(0, str(self.config["min_sales"]))
-
-        ttk.Label(fc, text="最低价格:").grid(row=13, column=2, sticky="e", padx=5, pady=3)
-        self.entry_min_price = ttk.Entry(fc, width=10)
-        self.entry_min_price.grid(row=13, column=3, sticky="w", padx=5, pady=3)
-        self.entry_min_price.insert(0, str(self.config["min_price"]))
-
-        ttk.Label(fc, text="最高价格:").grid(row=14, column=0, sticky="e", padx=5, pady=3)
-        self.entry_max_price = ttk.Entry(fc, width=10)
-        self.entry_max_price.grid(row=14, column=1, sticky="w", padx=5, pady=3)
-        self.entry_max_price.insert(0, str(self.config["max_price"]))
-
-        ttk.Label(fc, text="商品来源:").grid(row=14, column=2, sticky="e", padx=5, pady=3)
-        self.combo_source = ttk.Combobox(fc, width=17, state="readonly")
-        self.combo_source["values"] = ["high_commission", "nine_nine", "hot_sale", "high_rating"]
-        self.combo_source.grid(row=14, column=3, sticky="w", padx=5, pady=3)
-        self.combo_source.set(self.config.get("source_type", "high_commission"))
-
-        ttk.Label(fc, text="文案模板:").grid(row=15, column=0, sticky="e", padx=5, pady=3)
-        self.combo_template = ttk.Combobox(fc, width=32, state="readonly")
-        self.combo_template["values"] = ["1-标准模板", "2-紧迫感模板", "3-简洁模板", "4-可爱风模板"]
-        self.combo_template.grid(row=15, column=1, sticky="w", padx=5, pady=3)
-        self.combo_template.current(self.config.get("template_id", 1) - 1)
-
-        self.var_image = tk.BooleanVar(value=self.config.get("send_image", True))
-        ttk.Checkbutton(fc, text="发送商品主图", variable=self.var_image
-                        ).grid(row=15, column=2, columnspan=2, sticky="w", padx=5, pady=3)
-
-        self.var_random_delay = tk.BooleanVar(value=self.config.get("random_delay", True))
-        ttk.Checkbutton(fc, text="随机±30秒延时（降低风控）", variable=self.var_random_delay
-                        ).grid(row=16, column=0, columnspan=2, sticky="w", padx=10, pady=3)
-
-        self.var_auto_loop = tk.BooleanVar(value=self.config.get("auto_loop", True))
-        ttk.Checkbutton(fc, text="循环翻页（发完自动回到第1页）", variable=self.var_auto_loop
-                        ).grid(row=16, column=2, columnspan=2, sticky="w", padx=5, pady=3)
-
         # --------------------------------------------------------------
-        # 京东联盟配置（本次新增）
+        # 京东联盟配置（可选，填了京东商品就能转成你自己的推广链接，有佣金）
         # --------------------------------------------------------------
         ttk.Label(fc, text="── 京东联盟 API 配置（可选，填了京东商品就能转成你自己的推广链接，有佣金） ──",
-                  font=("", 10, "bold")).grid(row=18, column=0, columnspan=4, sticky="w", pady=(15, 5), padx=5)
+                  font=("", 10, "bold")).grid(row=8, column=0, columnspan=4, sticky="w", pady=(15, 5), padx=5)
 
-        ttk.Label(fc, text="京东AppKey:").grid(row=19, column=0, sticky="e", padx=5, pady=3)
+        ttk.Label(fc, text="京东AppKey:").grid(row=9, column=0, sticky="e", padx=5, pady=3)
         self.entry_jd_app_key = ttk.Entry(fc, width=65)
-        self.entry_jd_app_key.grid(row=19, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.entry_jd_app_key.grid(row=9, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
         self.entry_jd_app_key.insert(0, self.config.get("jd_app_key", ""))
 
-        ttk.Label(fc, text="京东AppSecret:").grid(row=20, column=0, sticky="e", padx=5, pady=3)
+        ttk.Label(fc, text="京东AppSecret:").grid(row=10, column=0, sticky="e", padx=5, pady=3)
         self.entry_jd_app_secret = ttk.Entry(fc, width=65)
-        self.entry_jd_app_secret.grid(row=20, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.entry_jd_app_secret.grid(row=10, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
         self.entry_jd_app_secret.insert(0, self.config.get("jd_app_secret", ""))
 
-        ttk.Label(fc, text="联盟ID(UnionId):").grid(row=21, column=0, sticky="e", padx=5, pady=3)
+        ttk.Label(fc, text="联盟ID(UnionId):").grid(row=11, column=0, sticky="e", padx=5, pady=3)
         self.entry_jd_union_id = ttk.Entry(fc, width=32)
-        self.entry_jd_union_id.grid(row=21, column=1, sticky="w", padx=5, pady=3)
+        self.entry_jd_union_id.grid(row=11, column=1, sticky="w", padx=5, pady=3)
         self.entry_jd_union_id.insert(0, self.config.get("jd_union_id", ""))
 
-        ttk.Label(fc, text="推广位PositionId:").grid(row=21, column=2, sticky="e", padx=5, pady=3)
+        ttk.Label(fc, text="推广位PositionId:").grid(row=11, column=2, sticky="e", padx=5, pady=3)
         self.entry_jd_position_id = ttk.Entry(fc, width=16)
-        self.entry_jd_position_id.grid(row=21, column=3, sticky="w", padx=5, pady=3)
+        self.entry_jd_position_id.grid(row=11, column=3, sticky="w", padx=5, pady=3)
         self.entry_jd_position_id.insert(0, self.config.get("jd_position_id", ""))
 
-        ttk.Label(fc, text="站点SiteId(可选):").grid(row=22, column=0, sticky="e", padx=5, pady=3)
+        ttk.Label(fc, text="站点SiteId(可选):").grid(row=12, column=0, sticky="e", padx=5, pady=3)
         self.entry_jd_site_id = ttk.Entry(fc, width=32)
-        self.entry_jd_site_id.grid(row=22, column=1, sticky="w", padx=5, pady=3)
+        self.entry_jd_site_id.grid(row=12, column=1, sticky="w", padx=5, pady=3)
         self.entry_jd_site_id.insert(0, self.config.get("jd_site_id", ""))
 
         ttk.Label(fc,
                   text="* 没填也能用：京东商品会自动识别+转发，但用的是京东商品直链（不跟单、无佣金）。申请&填写后即可拿佣金。",
                   foreground="gray", wraplength=680, justify="left"
-                  ).grid(row=23, column=0, columnspan=4, sticky="w", padx=5)
+                  ).grid(row=13, column=0, columnspan=4, sticky="w", padx=5)
 
         # --------------------------------------------------------------
         # 监听：违禁词 + 未识别转发规则
         # --------------------------------------------------------------
         ttk.Label(fc, text="── 监听跟单：规则配置 ──",
-                  font=("", 10, "bold")).grid(row=24, column=0, columnspan=4, sticky="w", pady=(15, 5), padx=5)
+                  font=("", 10, "bold")).grid(row=14, column=0, columnspan=4, sticky="w", pady=(15, 5), padx=5)
 
         ttk.Label(fc, text="违禁词（命中即不转发）:",
-                  ).grid(row=25, column=0, sticky="ne", padx=5, pady=3)
+                  ).grid(row=15, column=0, sticky="ne", padx=5, pady=3)
         self.entry_monitor_forbidden = scrolledtext.ScrolledText(fc, width=75, height=4, font=("", 9))
-        self.entry_monitor_forbidden.grid(row=25, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.entry_monitor_forbidden.grid(row=15, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
         try:
             self.entry_monitor_forbidden.insert("1.0", self.config.get("monitor_forbidden_words", ""))
         except Exception:
@@ -720,20 +837,20 @@ class FadanApp:
         ttk.Checkbutton(fc,
                         text="叠加内置通用违禁词（加群/加微信/刷单/高仿等，可在帮助页查看完整列表）",
                         variable=self.var_monitor_default_forbid
-                        ).grid(row=26, column=0, columnspan=4, sticky="w", padx=10, pady=3)
+                        ).grid(row=16, column=0, columnspan=4, sticky="w", padx=10, pady=3)
 
         self.var_monitor_orig = tk.BooleanVar(
             value=self.config.get("monitor_forward_original_when_unparsed", False))
         ttk.Checkbutton(fc,
                         text="没有识别到淘口令/京东口令时，也把原消息原文转发",
                         variable=self.var_monitor_orig
-                        ).grid(row=27, column=0, columnspan=4, sticky="w", padx=10, pady=3)
+                        ).grid(row=17, column=0, columnspan=4, sticky="w", padx=10, pady=3)
 
         # ── 关键词替换（每行一条，格式：原词=>新词）──
         ttk.Label(fc, text="关键词替换（每行一条）:",
-                  ).grid(row=28, column=0, sticky="ne", padx=5, pady=3)
+                  ).grid(row=18, column=0, sticky="ne", padx=5, pady=3)
         self.entry_monitor_keywords = scrolledtext.ScrolledText(fc, width=75, height=4, font=("", 9))
-        self.entry_monitor_keywords.grid(row=28, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.entry_monitor_keywords.grid(row=18, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
         try:
             self.entry_monitor_keywords.insert("1.0", self.config.get("monitor_keyword_replacements", ""))
         except Exception:
@@ -741,33 +858,33 @@ class FadanApp:
         ttk.Label(fc,
                   text="格式：原词=>新词  每行一条；转发时只替换指定词，其余文字不变。"
                        "例：内部价=>福利价  ｜  上家=>掌柜  ｜  刷单=>特惠",
-                  foreground="gray").grid(row=29, column=1, columnspan=3, sticky="w", padx=5)
+                  foreground="gray").grid(row=19, column=1, columnspan=3, sticky="w", padx=5)
 
         # ── 自动升级配置 ──
         ttk.Label(fc, text="── 在线升级配置 ──",
-                  font=("", 10, "bold")).grid(row=30, column=0, columnspan=4, sticky="w", padx=5, pady=(10, 5))
-        ttk.Label(fc, text="GitHub用户名:").grid(row=31, column=0, sticky="e", padx=5, pady=3)
+                  font=("", 10, "bold")).grid(row=20, column=0, columnspan=4, sticky="w", padx=5, pady=(10, 5))
+        ttk.Label(fc, text="GitHub用户名:").grid(row=21, column=0, sticky="e", padx=5, pady=3)
         self.entry_github_owner = ttk.Entry(fc, width=65)
-        self.entry_github_owner.grid(row=31, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.entry_github_owner.grid(row=21, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
         self.entry_github_owner.insert(0, self.config.get("github_owner", ""))
 
-        ttk.Label(fc, text="仓库名:").grid(row=32, column=0, sticky="e", padx=5, pady=3)
+        ttk.Label(fc, text="仓库名:").grid(row=22, column=0, sticky="e", padx=5, pady=3)
         self.entry_github_repo = ttk.Entry(fc, width=65)
-        self.entry_github_repo.grid(row=32, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.entry_github_repo.grid(row=22, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
         self.entry_github_repo.insert(0, self.config.get("github_repo", "taoke-fadan"))
 
         self.var_auto_check_update = tk.BooleanVar(
             value=self.config.get("auto_check_update", True))
         ttk.Checkbutton(fc, text="软件启动时自动检查更新",
                         variable=self.var_auto_check_update
-                        ).grid(row=33, column=0, columnspan=4, sticky="w", padx=10, pady=3)
+                        ).grid(row=23, column=0, columnspan=4, sticky="w", padx=10, pady=3)
         ttk.Label(fc,
                   text="* 在 github.com 注册账号→创建 public 仓库→把新exe上传为 Release 即可。软件自动检测下载替换。",
-                  foreground="gray").grid(row=34, column=1, columnspan=3, sticky="w", padx=5)
+                  foreground="gray").grid(row=24, column=1, columnspan=3, sticky="w", padx=5)
 
         # 按钮
         frame_btns = ttk.Frame(fc)
-        frame_btns.grid(row=35, column=0, columnspan=4, pady=18)
+        frame_btns.grid(row=25, column=0, columnspan=4, pady=18)
         ttk.Button(frame_btns, text="💾 保存配置", command=self.save_config
                    ).pack(side="left", padx=10)
         ttk.Button(frame_btns, text="🔗 测试折淘客API", command=self.test_api
@@ -779,33 +896,7 @@ class FadanApp:
         ttk.Button(frame_btns, text="📋 获取NapCat群列表", command=self.list_napcat_groups
                    ).pack(side="left", padx=10)
 
-    # ---------- Tab2 运行 ----------
-    def _build_run_tab(self, notebook):
-        fr = ttk.Frame(notebook)
-        notebook.add(fr, text="🚀 发单")
-
-        self.lbl_status = ttk.Label(fr, text="状态: 已停止", font=("", 12, "bold"), foreground="gray")
-        self.lbl_status.pack(pady=(12, 2))
-
-        self.lbl_count = ttk.Label(fr, text="已发送: 0 条", font=("", 10))
-        self.lbl_count.pack(pady=2)
-
-        frame_btns = ttk.Frame(fr)
-        frame_btns.pack(pady=10)
-        self.btn_start = ttk.Button(frame_btns, text="🚀 启动自动发单", command=self.start_fadan)
-        self.btn_start.pack(side="left", padx=10)
-        self.btn_stop = ttk.Button(frame_btns, text="⏹️ 停止发单", command=self.stop_fadan, state="disabled")
-        self.btn_stop.pack(side="left", padx=10)
-        self.btn_send_one = ttk.Button(frame_btns, text="📤 立即发一条", command=self.send_one)
-        self.btn_send_one.pack(side="left", padx=10)
-        self.btn_clear_log = ttk.Button(frame_btns, text="🗑 清空日志", command=self._clear_run_log)
-        self.btn_clear_log.pack(side="left", padx=10)
-
-        ttk.Label(fr, text="── 运行日志 ──").pack(anchor="w", padx=10, pady=(8, 0))
-        self.log_text = scrolledtext.ScrolledText(fr, width=120, height=18, font=("Consolas", 9))
-        self.log_text.pack(fill="both", expand=True, padx=10, pady=5)
-
-    # ---------- Tab3 监听跟单 ----------
+    # ---------- Tab2 监听跟单（首页） ----------
     def _build_monitor_tab(self, notebook):
         fm = ttk.Frame(notebook)
         notebook.add(fm, text="👂 监听跟单")
@@ -872,171 +963,188 @@ class FadanApp:
         ttk.Label(fm,
                   text="违禁词和未识别转发规则，请到【⚙️ 配置】页最下方「监听跟单：规则配置」里设置。",
                   foreground="gray", wraplength=680, justify="left"
-                  ).grid(row=91, column=0, columnspan=4, sticky="w", padx=10, pady=(6, 0))
+                  ).grid(row=10, column=0, columnspan=4, sticky="w", padx=10, pady=(6, 0))
 
-        # 按钮
+        # 按钮行（启动监听 / 停止监听 是主操作，做成强调色大按钮，放在最前面）
         fmb = ttk.Frame(fm)
-        fmb.grid(row=10, column=0, columnspan=4, pady=15)
-        ttk.Button(fmb, text="💾 保存配置", command=self.save_config
-                   ).pack(side="left", padx=10)
-        self.btn_mon_start = ttk.Button(fmb, text="▶️ 启动监听", command=self.start_monitor)
-        self.btn_mon_start.pack(side="left", padx=10)
-        self.btn_mon_stop = ttk.Button(fmb, text="⏹️ 停止监听", command=self.stop_monitor, state="disabled")
-        self.btn_mon_stop.pack(side="left", padx=10)
-        ttk.Button(fmb, text="🧪 测试解析（输入文本）", command=self.test_monitor_parse
-                   ).pack(side="left", padx=10)
-        ttk.Button(fmb, text="🗑 清空日志", command=self._clear_monitor_log
-                   ).pack(side="left", padx=10)
-
-        self.lbl_mon_status = ttk.Label(fm, text="监听状态: 已停止", font=("", 11, "bold"), foreground="gray")
-        self.lbl_mon_status.grid(row=11, column=0, columnspan=4, sticky="w", padx=10)
-
-        ttk.Label(fm, text="── 监听日志 ──").grid(row=12, column=0, columnspan=4, sticky="w", padx=10, pady=(10, 0))
-        self.monitor_log = scrolledtext.ScrolledText(fm, width=120, height=10, font=("Consolas", 9))
-        self.monitor_log.grid(row=13, column=0, columnspan=4, sticky="nsew", padx=10, pady=5)
+        fmb.grid(row=11, column=0, columnspan=4, pady=(15, 8), sticky="we")
         fm.columnconfigure(0, weight=1)
-        fm.rowconfigure(13, weight=1)
 
-    # ---------- Tab4 帮助 ----------
+        # 用 tk.Button 做更大更醒目的主按钮（比 ttk 默认的更显眼）
+        self.btn_mon_start = tk.Button(fmb, text="▶️  启动监听 （自动转链+转发）",
+                                       font=("", 12, "bold"),
+                                       bg="#16A34A", fg="white", activebackground="#15803D",
+                                       activeforeground="white", padx=22, pady=7, bd=0,
+                                       cursor="hand2", relief="flat",
+                                       command=self.start_monitor)
+        self.btn_mon_start.pack(side="left", padx=6)
+
+        self.btn_mon_stop = tk.Button(fmb, text="⏹️  停止监听",
+                                      font=("", 12, "bold"),
+                                      bg="#9CA3AF", fg="white", activebackground="#6B7280",
+                                      activeforeground="white", padx=22, pady=7, bd=0,
+                                      cursor="hand2", relief="flat",
+                                      state="disabled", command=self.stop_monitor)
+        self.btn_mon_stop.pack(side="left", padx=6)
+
+        # 右侧是次级操作（灰色系小按钮）
+        right_frm = ttk.Frame(fmb)
+        right_frm.pack(side="right", padx=4)
+        ttk.Button(right_frm, text="💾 保存配置", command=self.save_config
+                   ).pack(side="left", padx=4)
+        ttk.Button(right_frm, text="🧪 测试解析", command=self.test_monitor_parse
+                   ).pack(side="left", padx=4)
+        ttk.Button(right_frm, text="🗑 清空日志", command=self._clear_monitor_log
+                   ).pack(side="left", padx=4)
+
+        self.lbl_mon_status = ttk.Label(fm, text="监听状态: 已停止  （填好源群和目标群，点上方绿色大按钮即可开始）",
+                                        font=("", 10, "bold"), foreground="gray")
+        self.lbl_mon_status.grid(row=12, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
+
+        ttk.Label(fm, text="── 监听日志 ──", font=("", 9, "bold")
+                  ).grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(6, 0))
+        self.monitor_log = scrolledtext.ScrolledText(fm, width=120, height=10, font=("Consolas", 9))
+        self.monitor_log.grid(row=14, column=0, columnspan=4, sticky="nsew", padx=10, pady=(2, 10))
+        fm.rowconfigure(14, weight=1)
+
+    # ---------- Tab3 帮助 ----------
     def _build_help_tab(self, notebook):
         fh = ttk.Frame(notebook)
         notebook.add(fh, text="📖 帮助")
-        help_text = """淘客全自动发单助手 v1.0 —— 使用说明
+        help_text = f"""{APP_TITLE} {APP_VERSION_DISPLAY} —— 使用说明
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【一、前置准备（按顺序做）】
+【这个软件是干嘛的？】
 
-1️⃣ 注册折淘客（免费） https://www.zhetaoke.com/
-   - 登录后在"对接管理→应用管理"拿到 AppKey
-   - 去"授权管理→淘客授权管理"绑定你的淘宝联盟账号，授权成功后会生成 SID（授权ID）
-   - 绑定你的淘宝联盟 PID（格式 mm_xxx_xxx_xxx，在淘宝联盟→推广位管理里看）
+一句话：你盯紧一个「上家发单主群」→ 上家在群里发什么商品，软件自动抓到淘口令/链接/商品ID
+→ 转成你自己的推广链（佣金直接打你账户）→ 批量转发到你自己的 N 个 QQ 群发群。
 
-2️⃣ 安装并启动 NapCat
-   - 下载：https://github.com/NapNeko/NapCatQQ/releases
-   - 解压后运行 napcat.bat / 对应启动脚本
-   - 弹出二维码后，用【QQ小号】扫码登录（重要：不要用主号，防止风控封号）
-   - 在 NapCat 配置里确认 HTTP API 已开启、端口=3000（可自定义，要和软件一致）
-
-3️⃣ 准备 QQ 群
-   - 确保你这个 NapCat 登录的小号，已经加入了你那二三十个目标群
-   - 最好有普通发言权限（被禁言就发不出去了）
+顶栏的 3 个数字就是你的 KPI 看板：
+  🟢 今日转发（成功）：今天有多少条商品成功发到了你自己的群里
+  🔴 转链失败：淘宝/京东转链失败的次数（通常是凭证不对）
+  🟡 命中违禁词：上家发的消息里因为有敏感词被你过滤掉的条数
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【二、快速上手】
+【一、前置准备（4步）】
 
-① 打开软件 → "⚙️ 配置"页
-   - 填 AppKey / SID / PID
-   - NapCat 地址默认 127.0.0.1 / 3000（和 NapCat 一致即可）
-   - QQ 群号里把你二三十个群全部填进去，用英文逗号分隔
-   - 点击：【💾 保存配置】 → 【🔗 测试折淘客API】 → 【🤖 测试NapCat连接】
-   - 两项测试都 ✅ 再继续
+① 注册折淘客（免费，赚淘宝佣金必须有）
+   https://www.zhetaoke.com/
+   - 登录后「对接管理 → 应用管理」拿到 AppKey
+   - 「授权管理 → 淘客授权管理」绑定淘宝联盟账号，拿到 SID
+   - 绑定你的淘宝联盟 PID（格式 mm_xxx_xxx_xxx，在淘宝联盟后台「推广位管理」里拿）
 
-② 切到"🚀 发单"页
-   - 点击【🚀 启动自动发单】
-   - 软件会自动：取商品 → 筛选 → 转链 → 生成文案 → 合并图文 → 群发 → 等待 → 下一条
-   - "📤 立即发一条"：不等间隔，立刻推1条（测试用）
+② （可选）申请京东联盟（赚京东佣金必须有）
+   union.jd.com → 个人免费申请 → 拿到 AppKey / AppSecret / 联盟ID / 推广位PositionId
 
-③ （可选）切到"👂 监听跟单"页
-   - 填上家群号 + 上家QQ号 + 你自己的目标群号
-   - 点【▶️ 启动监听】
-   - 上家群里一发商品消息 → 软件自动解析 → 转成你自己的PID链接 → 转发到你所有群
+③ 安装并启动 NapCat（抓群消息 + 发群消息的桥）
+   https://github.com/NapNeko/NapCatQQ/releases
+   - 解压后启动 napcat.bat / 对应脚本
+   - ⚠️ 用【QQ小号】扫码登录（不要用主号，防止被风控封号）
+   - 确认 HTTP API 已开启、默认端口 3000（可改，和软件里填一致）
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【三、商品来源 & 文案模板】
-
-商品来源（4种，满足不同玩法）：
-  • high_commission  超高佣金（佣金≥50%，收益高）
-  • nine_nine        9.9 元包邮（引流款、拉活跃）
-  • hot_sale         全天销量榜（爆款、出单稳）
-  • high_rating      超高评分 + 高佣金（综合质量款）
-
-文案模板：
-  ① 标准模板：标题 / 原价 / 券后价 / 佣金 / 月销 / 店铺 + 口令 + 链接
-  ② 紧迫感模板：突出"券剩X张"、"手慢无"，适合推时效类商品
-  ③ 简洁模板：只有券后价 + 标题 + 口令，适合刷屏风险高的大群
-  ④ 可爱风模板：emoji 风，氛围轻松，适合宝妈 / 学生社群
+④ 准备两个角色的群：
+   - 主群（上家群）：你的小号必须已经在群里
+   - 目标群（你自己的群发群）：小号同样必须入群，并且有普通发言权限
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【四、风控建议（很重要！）】
+【二、快速上手（5 步启动）】
 
-1. 发单间隔建议 ≥ 300 秒（5分钟）。有二三十个群的话，每个群每小时发 1~2 条就够了。
-2. 勾选"随机±30秒延时"，避免机器人感太强。
-3. 必须用 QQ 小号登录 NapCat！主号被封得不偿失。
-4. NapCat 长期运行建议用一台 Windows 服务器 / 常开的电脑，不能休眠关机。
-5. 若某群发不出去，先手动用小号在该群发一条普通消息试试，确认没被禁言。
+第 1 步：打开「⚙️ 参数设置」Tab
+       → 填折淘客 AppKey / SID / PID
+       → NapCat 地址（默认 127.0.0.1:3000）+ 有 Token 就填 Token
+       → （可选）京东联盟 4 项填完整
+       → 点【💾 保存配置】→ 依次点【🔗 测试折淘客API】【🤖 测试NapCat连接】【🧩 测试京东联盟API】
+       → 必须全部 ✅ 再往下走，否则后面转链/发群都会失败。
+
+第 2 步：回到首页「👂 监听跟单」Tab
+       → 监听源群号：填你上家的主群号（群号获取方法：点右侧【📋 选择群】→ 自动从 NapCat 抓群列表）
+       → 监听QQ号：**强烈建议只填你上家的QQ号**，这样群里其他成员闲聊不会被误转发
+         （留空 = 监听群里所有人发言，广告闲聊也会被触发，不太推荐）
+       → 目标群号：填你自己的群发群，多个群用英文逗号分隔（同样可以点【📋 选择群】批量选）
+
+第 3 步：（可选但强烈建议）切回「⚙️ 参数设置」页面下方
+       → 勾选"叠加内置通用违禁词"
+       → 自己额外再加几个上家名字里的敏感词
+       → 保存配置
+
+第 4 步：切回「👂 监听跟单」Tab，先别急着启动
+       → 先点【🧪 测试解析（输入文本）】，粘贴一段上家群里的真实商品消息
+       → 看日志里是否显示"✅ 淘宝转链成功！淘口令:￥xxx￥"
+       → 成功说明转链链路通了，佣金是你的。
+
+第 5 步：点【▶️ 启动监听】，顶栏状态灯立刻从灰色（未启动）变成绿色（运行中）。
+       → 让上家在主群发一条带淘口令的消息，3~5 秒内日志会出现：
+         📥 检测到商品消息 → 🔗 转链成功 → 📤 已转发 X/Y 个群
+       → 同时你的 KPI 看板 +1。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【三、顶栏 KPI 说明】
+
+🟢 今日转发（成功）
+  每成功转发一条商品（至少一个目标群发送成功），计数 +1。
+  （注意：一条商品如果成功发到了 5 个群，也只算 +1，代表"成功处理了一条"）
+
+🔴 转链失败
+  淘宝/JD API 返回空 → 说明凭证错了/账户没授权/商品受保护。出现 +1 就去查凭证。
+
+🟡 命中违禁词
+  上家群里的消息因为有违禁词被自动丢弃。数涨得快 → 去调整违禁词列表。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【四、监听规则（配置页下方）详解】
+
+▶ 违禁词过滤：
+  • 支持逗号 / 空格 / 换行分隔，命中即丢弃整条消息
+  • 建议保持「叠加内置通用违禁词」勾选，覆盖大部分引流/违规/敏感内容
+  • 内置默认词：加群/加微信/加V/私我/代购/刷单/垫付/赌博/色情/好评返现/仿牌/高仿/A货 等
+  • 想放过上家某个词，把它从自定义词表里删掉即可
+  • 修改后必须「保存配置 → 停止监听 → 重新启动监听」才会生效 ✅
+
+▶ 关键词替换（每行一条，格式 原词=>新词）：
+  例：内部价=>福利价  ｜  上家=>掌柜  ｜  限群内粉丝=>手慢无
+  转发前自动替换文本里的词，其他内容原样不变。适合清洗上家的引流痕迹。
+
+▶ 未识别到口令/链接时是否原文转发：
+  • 关（推荐）：识别不到商品的消息直接丢弃，不把闲聊/广告同步到你的群发群
+  • 开：上家发任何东西都1:1转发（图片/表情/格式保留）
+    只适合：上家文案风格统一 + 你只监听了上家QQ号。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【五、常见问题】
 
-Q: 测试折淘客API失败？
-A: ① AppKey 填错了  ② 折淘客后台没填你的 PID
+Q: 点启动监听后，主群发了东西日志没反应？
+A: ① NapCat 没连上（先在设置页点 🤖测试NapCat连接）② 源群号填错了（用 📋选择群选出来的最准）
+   ③ 监听QQ号没填对（比如你填了上家QQ号，但这条是上家另一个小号发的 → 建议先留空测试）
 
-Q: SID 在哪找？
-A: 折淘客后台 → 授权管理 → 淘客授权管理 → 授权后的列表里看 SID
+Q: 识别到了，但显示「淘宝转链失败」？
+A: 通常是折淘客三件套没对：AppKey错 / SID失效 / PID错，去折淘客后台重新授权一次。
 
-Q: NapCat 测试连接失败？
-A: ① NapCat 没启动  ② 端口不一致  ③ 设置了 token 但软件没填  ④ 防火墙拦了
+Q: 转发后群里的淘口令打开"商品失效"？
+A: SID/PID授权失效了。在折淘客后台「授权管理」重新授权一次淘宝联盟账号，
+   然后保存 → 停止 → 重启监听。
 
-Q: 商品发出去但淘口令打开提示"商品失效"？
-A: 多半是 SID / PID 没有正确授权。回折淘客"授权管理"重新授权一次，并在淘宝联盟后台确认推广位有效。
+Q: 群{xx}发送失败？
+A: ① 小号没进群  ② 小号被禁言  ③ NapCat 掉线了（重新扫码登录）
 
-Q: 提示"群{xx}发送失败"？
-A: ① 小号没在群里  ② 小号被禁言  ③ NapCat 掉线了（重新扫码登录）
-
-Q: 二三十个群一次循环要多久？
-A: 默认设置：每群 1 条 / 5 分钟，单次循环就是 N 个群 × 1 条 × 5 分钟 ≈ 以"小时"为节奏，不容易被风控。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【六、京东联盟（新增）怎么用？】
-
-1. 申请账号：京东联盟 union.jd.com（用你京东账号或企业账号登录即可，个人也可以免费申请）
-2. 拿到 4 个核心信息，填到软件【⚙️ 配置】页的"京东联盟 API 配置"：
-   ① AppKey       → 联盟后台 →  API管理 → 我的应用 → 创建应用后获得
-   ② AppSecret    → 同 AppKey 页面
-   ③ 联盟ID(UnionId)     → 联盟后台顶部 「账户管理 → 联盟ID管理」
-   ④ 推广位 PositionId   → 联盟后台顶部 「推广管理 → 推广位管理」 → 新建一个"PC/无线"推广位
-   ⑤ SiteId（可选，一般不用填）
-3. 填完 → 点「💾 保存配置」→ 点「🧩 测试京东联盟API」→ 成功后，以后监听/发单里的京东商品，
-   都会自动转成【你的推广链接】，跟单佣金自动结算到你的京东联盟账户。
-4. 如果暂时没申请，别担心：软件依然能识别京东商品并转发，只是用的是京东商品直链（无佣金），
-   文案里会自动加一行黄色提示 ⚠️，等你填入上述4个信息保存+重启监听，佣金就立刻生效。
+Q: 京东商品能识别，但转发后文案里写「无京东联盟KEY→直链无佣金」？
+A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再重启，立刻生效。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【七、监听跟单新增两条规则】
+【六、关于 KPI 数字的含义（非常实用）】
 
- ▶ 违禁词过滤（配置页最下方）：
-   • 在「违禁词」框里，填你不希望从家里转发到自己群里的词，用逗号/空格/换行分隔都可以
-     例如：加微信, 私我, 刷单, A货, 官方旗舰店, 上家内部价
-   • 叠加"内置通用违禁词"建议保持勾选（内置词列表在下面），覆盖大部分引流/违规/敏感内容
-   • 命中任一违禁词的上家消息 → 直接丢弃不转发（日志里会提示 🔴 命中违禁词已跳过）
-   • 内置通用违禁词默认清单：
-       加群 / 加QQ / 加V / 加微信 / 加wx / 私我 / 私聊 / 私信我
-       代购 / 代拍 / 刷单 / 垫付 / 赌博 / 博彩 / 彩票 / 棋牌 / 色情 / 黄色
-       退款返现 / 好评返现 / 官方旗舰店 / 仿牌 / 高仿 / A货 / 一比一
-   • 这些词你不想要就取消"叠加内置"勾选，或者把需要"反向放过"的词从自己的词表里删除。
-
- ▶ 未识别到淘口令/京东口令时 是否原文转发（配置页最下方 开关）：
-   • 默认 关。建议保持"关"，避免把上家群里的闲聊广告/闲聊内容都同步到你自己的二三十个群发
-   • 打开后：如果上家发的消息，软件识别不到淘口令/京东口令/商品ID/京东sku，
-           也会把整条原文文本（按 NapCat 原消息顺序保留图片段/文本段）转发到你自己的所有目标群。
-           适合：上家的文案风格非常统一、你非常信任上家的所有内容 → 1:1 同步。
+  • 运行 1 小时，「今日转发」没有任何增长？ 上家群里没发商品 / 或者你填的监听QQ号太窄。
+  • 「转链失败」在增长？立刻打开设置页重跑 🔗测试折淘客API / 🧩测试京东联盟API，凭证有问题。
+  • 「命中违禁词」连续涨了好几十？要么上家在狂发违规内容（是好事，帮你过滤了），
+    要么你的违禁词设太严了，回设置页改。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【八、京东联盟 & 违禁词 & 未识别转发 常见问题】
+【七、关于在线升级】
 
-Q: 监听到上家的京东链接，为什么日志里显示"未配置京东联盟账号 → 兜底链接（无佣金）"？
-A: 就是上面第六步 4 个字段没填完整。填完保存配置 → 停止监听 → 重新启动监听 即可生效。
-
-Q: 我填了京东联盟4项，测试成功，但转链出来还是直链？
-A: 检查你的京东联盟应用状态是否为「已上线」、「推广位」是对应账号下的、以及账户没有被冻结。
-   个人账号首次审核通过一般要 1~3 天。
-
-Q: 违禁词我填了"官方旗舰店"，但还是被转发了？
-A: 注意：必须先点「💾 保存配置」，然后**停止监听 → 重新启动监听**，规则才会加载到运行时。
-
-Q: 我打开了"未识别到口令也原文转发"，结果闲聊内容也被转发了？
-A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精确设置为只有上家QQ号，
-   要么关掉这个开关（推荐），只转发明确识别到的商品消息。"""
+• 在 GitHub 上创建一个 public 仓库 → 把新的 .exe 上传为 Release
+  （tag 要比当前 APP_VERSION 大，比如当前是 1.0.7 就标 1.0.8）
+• 软件 → 设置页最下方「在线升级配置」里填 GitHub 用户名 + 仓库名 → 保存
+• 以后新版本一出，软件自动检测 → 下载 → 替换 → 重启。
+"""
         box = scrolledtext.ScrolledText(fh, width=130, height=30, font=("", 9))
         box.pack(fill="both", expand=True, padx=10, pady=10)
         box.insert("1.0", help_text)
@@ -1046,22 +1154,32 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
     # 日志
     # =========================================================
     def log(self, msg):
+        """
+        统一日志输出：优先写监听页的运行日志（当前唯一日志面板）。
+        UI 还没 build 好时走 print 兜底，避免早期调用出错。
+        """
         now = datetime.now().strftime("%H:%M:%S")
-        self.log_text.insert("end", f"[{now}] {msg}\n")
-        self.log_text.see("end")
-        self.root.update()
-
-    def _clear_run_log(self):
-        self.log_text.delete("1.0", "end")
+        line = f"[{now}] {msg}\n"
+        target = getattr(self, "monitor_log", None)
+        if target is not None and hasattr(target, "insert"):
+            try:
+                target.insert("end", line)
+                target.see("end")
+                self.root.update()
+                return
+            except Exception:
+                pass
+        # 兜底
+        print(line, end="")
 
     def monitor_log_write(self, msg):
-        now = datetime.now().strftime("%H:%M:%S")
-        self.monitor_log.insert("end", f"[{now}] {msg}\n")
-        self.monitor_log.see("end")
-        self.root.update()
+        """监听专用日志（等同于 log，保留旧调用点以兼容）"""
+        self.log(msg)
 
     def _clear_monitor_log(self):
-        self.monitor_log.delete("1.0", "end")
+        """清空监听页日志"""
+        if getattr(self, "monitor_log", None):
+            self.monitor_log.delete("1.0", "end")
 
     # =========================================================
     # 配置页：测试按钮
@@ -1323,264 +1441,48 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
         win.geometry(f"+{max(0,x)}+{max(0,y)}")
 
     # =========================================================
-    # 发单核心
-    # =========================================================
-    def start_fadan(self):
-        self.save_config()
-        # 基础校验
-        if not self.config["appkey"]:
-            messagebox.showerror("参数缺失", "请填写折淘客 AppKey")
-            return
-        if not self.config["sid"]:
-            messagebox.showerror("参数缺失", "请填写 SID（折淘客授权ID）")
-            return
-        if not self.config["group_ids"]:
-            messagebox.showerror("参数缺失", "请填写至少一个QQ群号")
-            return
-
-        self.is_running = True
-        self.sent_count = 0
-        self.btn_start.config(state="disabled")
-        self.btn_stop.config(state="normal")
-        self.lbl_status.config(text="状态: 运行中...", foreground="green")
-        self.lbl_count.config(text="已发送: 0 条")
-
-        self.thread = threading.Thread(target=self._run_loop, daemon=True)
-        self.thread.start()
-
-    def stop_fadan(self):
-        self.is_running = False
-        self.btn_start.config(state="normal")
-        self.btn_stop.config(state="disabled")
-        self.lbl_status.config(text="状态: 已停止", foreground="gray")
-        self.log("⏹️ 发单已停止")
-
-    def send_one(self):
-        """立即发一条（独立线程，不阻塞界面）"""
-        self.save_config()
-        threading.Thread(target=self._send_one_product, daemon=True).start()
-
-    # ---------- 内部：取商品（按 source_type 分发） ----------
-    def _fetch_page_products(self, api, source, page, page_size):
-        if source == "nine_nine":
-            return api.get_nine_products(page=page, page_size=page_size)
-        if source == "hot_sale":
-            return api.get_hot_sale(page=page, page_size=page_size)
-        if source == "high_rating":
-            return api.get_high_rating(page=page, page_size=page_size,
-                                       commission_rate_start=max(0, self.config["min_commission"] - 20))
-        # high_commission / 默认
-        return api.get_products(page=page, page_size=page_size,
-                                commission_rate_start=self.config["min_commission"])
-
-    # ---------- 内部：按配置规则筛选 ----------
-    def _filter_product(self, p):
-        try:
-            price = float(p.get("quanhou_jiage") or 0)
-        except Exception:
-            price = 0
-        try:
-            sales = int(p.get("volume") or 0)
-        except Exception:
-            sales = 0
-        try:
-            commission = float(p.get("tkrate3") or 0)
-        except Exception:
-            commission = 0
-        if price < self.config["min_price"] or price > self.config["max_price"]:
-            return False
-        if sales < self.config["min_sales"]:
-            return False
-        if commission < self.config["min_commission"]:
-            return False
-        return True
-
-    # ---------- 立即发1条 ----------
-    def _send_one_product(self):
-        try:
-            api = ZhetaokeAPI(self.config["appkey"], self.config["sid"], self.config["pid"])
-            gen = CopyGenerator(template_id=self.config.get("template_id", 1))
-            sender = NapCatSender(self.config["napcat_host"],
-                                  int(self.config["napcat_port"] or 3000),
-                                  self.config["napcat_token"])
-
-            ok, _ = sender.check_connection()
-            if not ok:
-                self.log("❌ NapCat 未连接，无法发送")
-                return
-
-            self.log("📦 正在获取商品列表...")
-            source = self.config.get("source_type", "high_commission")
-            products = self._fetch_page_products(api, source, page=1, page_size=50)
-            if not products:
-                self.log("❌ 未获取到商品，请检查 AppKey / 网络 / 商品来源。")
-                return
-
-            filtered = [p for p in products if self._filter_product(p)]
-            if not filtered:
-                self.log("❌ 筛选后没有符合条件的商品，请放宽佣金/价格/销量条件。")
-                return
-
-            product = random.choice(filtered)
-            title = str(product.get("title", ""))
-            self.log(f"🎯 选中: {title[:40]}...")
-
-            # 转链
-            tao_id = product.get("tao_id") or product.get("num_iid")
-            converted = {}
-            if tao_id:
-                self.log("🔗 正在高佣转链生成淘口令...")
-                c = api.convert_link(tao_id)
-                if not c:
-                    self.log("⚠️ 转链失败，将用原始商品字段+占位口令发送（点击可能不会返利，建议检查SID授权）")
-                else:
-                    converted = c
-
-            # 文案
-            copy_text = gen.generate(product, converted)
-            self.log(f"✍️ 文案已生成（{len(copy_text)}字）")
-
-            # 发送
-            groups = [g.strip() for g in self.config["group_ids"].split(",") if g.strip()]
-            image_url = product.get("pict_url") if self.config.get("send_image", True) else None
-
-            for group_id in groups:
-                self.log(f"📤 发送到群 {group_id} ...")
-                ok_send, _ = sender.send_group_text_and_image(group_id, copy_text, image_url=image_url)
-                if ok_send:
-                    self.sent_count += 1
-                    self.lbl_count.config(text=f"已发送: {self.sent_count} 条")
-                    self.log(f"✅ 群 {group_id} 发送成功")
-                else:
-                    self.log(f"❌ 群 {group_id} 发送失败")
-
-        except Exception as e:
-            self.log(f"❌ 发送异常: {e}")
-            import traceback
-            traceback.print_exc()
-
-    # ---------- 循环发单 ----------
-    def _run_loop(self):
-        self.log("🚀 自动发单已启动！循环拉取 → 筛选 → 转链 → 群发。")
-        page = 1
-        used_codes = set()
-
-        while self.is_running:
-            try:
-                api = ZhetaokeAPI(self.config["appkey"], self.config["sid"], self.config["pid"])
-                gen = CopyGenerator(template_id=self.config.get("template_id", 1))
-                sender = NapCatSender(self.config["napcat_host"],
-                                      int(self.config["napcat_port"] or 3000),
-                                      self.config["napcat_token"])
-
-                ok, _ = sender.check_connection()
-                if not ok:
-                    self.log("❌ NapCat 未连接，等待 30 秒后重试...")
-                    for _ in range(30):
-                        if not self.is_running:
-                            break
-                        time.sleep(1)
-                    continue
-
-                source = self.config.get("source_type", "high_commission")
-                products = self._fetch_page_products(api, source, page, page_size=50)
-
-                if not products:
-                    # 拿不到商品，要么翻完了要么接口异常
-                    if self.config.get("auto_loop", True):
-                        self.log(f"📖 第{page}页无商品，回到第1页继续...")
-                        page = 1
-                    else:
-                        self.log(f"📖 第{page}页无商品，已停止翻页（未勾选循环）")
-                        self.stop_fadan()
-                        break
-                    # 小歇一下
-                    for _ in range(10):
-                        if not self.is_running:
-                            break
-                        time.sleep(1)
-                    continue
-
-                # 筛选 + 去重（折淘客唯一ID优先用 code 字段，否则用 tao_id）
-                filtered = []
-                for p in products:
-                    uniq = p.get("code") or p.get("tao_id") or p.get("num_iid") or str(p)
-                    if uniq in used_codes:
-                        continue
-                    if self._filter_product(p):
-                        filtered.append(p)
-                        used_codes.add(uniq)
-
-                # 控制去重集大小
-                if len(used_codes) > 2000:
-                    used_codes = set(list(used_codes)[-800:])
-
-                if not filtered:
-                    self.log(f"第{page}页没有符合条件的新商品，翻下一页...")
-                    page += 1
-                    continue
-
-                # 发每个商品
-                for product in filtered:
-                    if not self.is_running:
-                        break
-
-                    tao_id = product.get("tao_id") or product.get("num_iid")
-                    converted = {}
-                    if tao_id:
-                        converted = api.convert_link(tao_id)
-                        if not converted:
-                            self.log(f"⚠️ 转链失败(跳过): {str(product.get('title',''))[:24]}")
-                            continue
-
-                    copy_text = gen.generate(product, converted)
-                    groups = [g.strip() for g in self.config["group_ids"].split(",") if g.strip()]
-                    image_url = product.get("pict_url") if self.config.get("send_image", True) else None
-
-                    ok_any = False
-                    for group_id in groups:
-                        if not self.is_running:
-                            break
-                        ok_send, _ = sender.send_group_text_and_image(
-                            group_id, copy_text, image_url=image_url)
-                        if ok_send:
-                            self.sent_count += 1
-                            self.lbl_count.config(text=f"已发送: {self.sent_count} 条")
-                            ok_any = True
-                        else:
-                            self.log(f"❌ 发送失败 → 群 {group_id}")
-
-                    t_short = str(product.get("title", ""))[:20]
-                    if ok_any:
-                        self.log(f"✅ [{t_short}...] 已发")
-                    else:
-                        self.log(f"⚠️ [{t_short}...] 所有群都没发出去")
-
-                    # 间隔等待（带随机，且可随时中断）
-                    interval = self.config["interval"]
-                    if self.config.get("random_delay", True):
-                        interval += random.randint(-30, 30)
-                    interval = max(60, interval)
-                    self.log(f"⏳ 等待 {interval} 秒后发下一条...")
-                    for _ in range(interval):
-                        if not self.is_running:
-                            break
-                        time.sleep(1)
-
-                page += 1
-
-            except Exception as e:
-                self.log(f"❌ 发单循环异常: {e}")
-                import traceback
-                traceback.print_exc()
-                for _ in range(30):
-                    if not self.is_running:
-                        break
-                    time.sleep(1)
-
-    # =========================================================
     # 监听跟单
     # =========================================================
+
+    # -------- 顶部状态栏：状态灯 + KPI --------
+    def _set_monitor_status(self, running):
+        """刷新 KPI 栏的监听状态灯颜色 / 文字（在 UI 线程安全调用）"""
+        def _apply():
+            light = getattr(self, "lbl_mon_status_light", None)
+            if light is None:
+                return
+            if running:
+                light.configure(bg="#DCFCE7", fg="#166534", text="  监听：运行中  ")
+            else:
+                light.configure(bg="#EFEFF2", fg="#52525B", text="  监听：未启动  ")
+        try:
+            self.root.after(0, _apply)
+        except Exception:
+            _apply()
+
+    def _refresh_kpi_ui(self):
+        """把内存里的 KPI 计数同步刷新到顶栏卡片上"""
+        def _apply():
+            for name in ("kpi_forward_ok", "kpi_convert_fail", "kpi_forbidden_hit"):
+                lbl_name = "lbl_" + name
+                lbl = getattr(self, lbl_name, None)
+                if lbl is None:
+                    continue
+                lbl.configure(text=str(getattr(self, name, 0)))
+        try:
+            self.root.after(0, _apply)
+        except Exception:
+            _apply()
+
+    def _inc_kpi(self, name, n=1):
+        """KPI +N，并立即刷新UI显示。后台线程可直接调用。"""
+        try:
+            cur = getattr(self, name, 0)
+            setattr(self, name, cur + n)
+        except Exception:
+            pass
+        self._refresh_kpi_ui()
+
     def start_monitor(self):
         self.save_config()
         # 校验
@@ -1627,9 +1529,45 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
         except Exception:
             pass
 
-        self.btn_mon_start.config(state="disabled")
-        self.btn_mon_stop.config(state="normal")
-        self.lbl_mon_status.config(text="监听状态: 运行中...", foreground="green")
+        def _start_state():
+            # Tab 里的两个按钮
+            try:
+                self.btn_mon_start.config(state="disabled")
+            except Exception:
+                pass
+            try:
+                self.btn_mon_stop.config(state="normal")
+            except Exception:
+                pass
+            # 顶栏 KPI 行的两个按钮（同步颜色 + 可用性）
+            try:
+                self.btn_topbar_start.config(state="disabled", bg="#86EFAC", fg="#052E16",
+                                             activebackground="#86EFAC", activeforeground="#052E16")
+            except Exception:
+                pass
+            try:
+                self.btn_topbar_stop.config(state="normal", bg="#EF4444", fg="white",
+                                            activebackground="#DC2626", activeforeground="white")
+            except Exception:
+                pass
+            try:
+                self.lbl_mon_status.config(text="监听状态: 运行中...（顶栏绿灯亮起，有消息会立刻出现在下面日志里）",
+                                           foreground="green")
+            except Exception:
+                pass
+
+        try:
+            self.root.after(0, _start_state)
+        except Exception:
+            _start_state()
+
+        # 启动时：KPI 清零 + 状态灯变绿
+        self.kpi_forward_ok = 0
+        self.kpi_convert_fail = 0
+        self.kpi_forbidden_hit = 0
+        self._refresh_kpi_ui()
+        self._set_monitor_status(True)
+
         self.monitor_log_write("▶️ 监听已启动。等待上家群消息...")
 
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
@@ -1637,9 +1575,40 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
 
     def stop_monitor(self):
         self.monitor_running = False
-        self.btn_mon_start.config(state="normal")
-        self.btn_mon_stop.config(state="disabled")
-        self.lbl_mon_status.config(text="监听状态: 已停止", foreground="gray")
+
+        def _stop_state():
+            try:
+                self.btn_mon_start.config(state="normal")
+            except Exception:
+                pass
+            try:
+                self.btn_mon_stop.config(state="disabled")
+            except Exception:
+                pass
+            # 顶栏两个按钮同步：启动变回绿色可点，停止变灰不可点
+            try:
+                self.btn_topbar_start.config(state="normal",
+                                             bg="#16A34A", fg="white",
+                                             activebackground="#15803D", activeforeground="white")
+            except Exception:
+                pass
+            try:
+                self.btn_topbar_stop.config(state="disabled",
+                                            bg="#9CA3AF", fg="white",
+                                            activebackground="#6B7280", activeforeground="white")
+            except Exception:
+                pass
+            try:
+                self.lbl_mon_status.config(text="监听状态: 已停止", foreground="gray")
+            except Exception:
+                pass
+
+        try:
+            self.root.after(0, _stop_state)
+        except Exception:
+            _stop_state()
+
+        self._set_monitor_status(False)
         self.monitor_log_write("⏹️ 监听已停止")
 
     def test_monitor_parse(self):
@@ -1806,6 +1775,7 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
                             f"🔴 命中违禁词已跳过（QQ:{msg.get('user_id')} {msg.get('nickname')}）"
                             f"  原文前60字：{original_text[:60]!r}"
                         )
+                        self._inc_kpi("kpi_forbidden_hit", 1)
                         continue
 
                     # ② 关键词替换：违禁词过滤通过后，对文本做替换（只换指定词，其他不变）
@@ -1850,6 +1820,8 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
                                     ok_send, _ = sender.send_group_text(gid, text or str(raw or ""))
                                 if ok_send:
                                     total_ok += 1
+                            if total_ok > 0:
+                                self._inc_kpi("kpi_forward_ok", 1)
                             self.monitor_log_write(f"📤 原文转发完成 {total_ok}/{len(target_groups)} 个群")
                             continue
 
@@ -1877,6 +1849,7 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
                         if not converted:
                             converted = {"platform": "jd", "shorturl": "https://www.jd.com", "need_key": True,
                                          "error": "转链失败"}
+                            self._inc_kpi("kpi_convert_fail", 1)
                         # 监听场景没有京东商品详情接口，product 用空，文案从模板默认字段 + 原始链接展示
                         copy_text = gen.generate({}, converted, raw_text=info.get("raw_text", ""))
                         image_url = None  # 京东目前没抓详情主图（抓图需额外API，按send_image配置决定后续可以扩展）
@@ -1891,6 +1864,8 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
                                 ok_send, _ = sender.send_group_text(gid, copy_text)
                             if ok_send:
                                 total_ok += 1
+                        if total_ok > 0:
+                            self._inc_kpi("kpi_forward_ok", 1)
                         self.monitor_log_write(
                             f"📤 已转发京东商品 {total_ok}/{len(target_groups)} 个群"
                             + ("  （⚠️ 无京东联盟KEY→直链无佣金）" if converted.get("need_key") else "")
@@ -1916,6 +1891,7 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
                         converted = api.convert_link(num_iid)
                         if not converted:
                             self.monitor_log_write("⚠️ 淘宝转链失败，跳过本次（通常是SID/PID未授权或商品受保护）")
+                            self._inc_kpi("kpi_convert_fail", 1)
                             continue
 
                     product_ctx = {}
@@ -1940,6 +1916,8 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
                             gid, copy_text, image_url=image_url)
                         if ok_send:
                             total_ok += 1
+                    if total_ok > 0:
+                        self._inc_kpi("kpi_forward_ok", 1)
                     self.monitor_log_write(f"📤 已转发淘宝商品 {total_ok}/{len(target_groups)} 个群")
 
             except Exception as e:

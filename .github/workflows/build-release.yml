@@ -1,43 +1,54 @@
 # =============================================================
-# GitHub Actions 自动打包发布
-# 触发条件：推送一个 v 开头的 tag（如 v1.0.1）
-# 效果：GitHub 服务器自动在 Windows 环境打包 exe → 自动创建 Release → 上传 exe
-# 用户软件检测到新版本后自动下载升级
+# GitHub Actions 自动打包发布（方案B · 猪儿虫发单软件）
+# 触发条件：你在 GitHub 仓库推一个 v 开头的 tag，比如：
+#             git tag v1.0.1
+#             git push origin v1.0.1
+# 效果：
+#   1. GitHub 免费开一台 Windows 服务器
+#   2. 装 Python 3.11 + requests + Pillow + PyInstaller
+#   3. 按跟你本地「打包成exe.bat」完全一致的参数打 EXE
+#      （带粉小猪图标 · 带 assets/ · 8个业务模块 hidden-import）
+#   4. 自动创建 Release → 上传 EXE + config.json + 使用说明.txt
+#   5. 用户端软件打开时「检查更新」会自动发现这个 tag，
+#      下载新 EXE 覆盖旧的 → 完成在线升级 ✅
 # =============================================================
-name: 打包发布EXE
+name: 猪儿虫发单软件 - 打包发布EXE
 
 on:
   push:
     tags:
-      - 'v*'  # 匹配 v1.0.0 / v1.0.1 / v2.0.0 等
+      - 'v*'                # v1.0.0 / v1.0.1 / v1.1.0 / v2.0.0 都命中
 
 jobs:
   build:
-    runs-on: windows-latest  # GitHub 免费提供 Windows 服务器
+    runs-on: windows-latest  # GitHub 免费 Windows Runner
 
     steps:
-      # 1. 拉取代码
+      # ================== 1. 拉取代码 ==================
       - name: 拉取代码
         uses: actions/checkout@v4
 
-      # 2. 安装 Python
-      - name: 安装 Python
+      # ================== 2. 安装 Python ==================
+      - name: 安装 Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 3. 安装依赖
-      - name: 安装依赖
+      # ================== 3. 安装依赖 ==================
+      - name: 安装依赖（requests + Pillow + PyInstaller，国内加速源）
         run: |
           python -m pip install --upgrade pip
-          pip install requests pyinstaller
+          pip install requests pillow pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-      # 4. 打包 exe（复用现有的 PyInstaller 命令）
-      - name: 打包 EXE
+      # ================== 4. 打包 EXE ==================
+      # 注意：和本地「打包成exe.bat」使用的参数 100% 一致，避免云端打包和本地打包行为不一致
+      - name: 打包 EXE（粉小猪图标 + assets + 8个hidden-import + onefile + windowed）
         run: |
           pyinstaller --noconfirm --clean --noupx `
             --onefile --windowed `
-            --name "淘客全自动发单助手" `
+            --name "猪儿虫发单软件" `
+            --icon "assets\icon.ico" `
+            --add-data "assets;assets" `
             --hidden-import=zhetaoke_api `
             --hidden-import=copy_generator `
             --hidden-import=napcat_sender `
@@ -45,36 +56,141 @@ jobs:
             --hidden-import=jd_union_api `
             --hidden-import=auto_updater `
             --hidden-import=license `
+            --collect-submodules tkinter `
             main.py
 
-      # 5. 把 config.json 复制到 dist（作为 Release 附件一起发布）
-      - name: 复制 config.json
+      # ================== 5. 准备发布附件 ==================
+      # 跟本地打包后的 dist 目录保持一致：EXE + config.json + 使用说明.txt
+      - name: 整理发布附件（config.json + 使用说明.txt）
         run: |
+          # --- 5.1 config.json ---
           if (Test-Path config.json) {
             Copy-Item config.json dist\config.json
           } else {
-            # 如果没有 config.json，生成一个默认的（不含敏感信息）
-            '{"appkey":"","sid":"","pid":"","napcat_host":"127.0.0.1","napcat_port":"3000","napcat_token":"","group_ids":"","interval":600,"min_commission":30,"min_sales":100,"min_price":0,"max_price":9999,"template_id":1,"source_type":"high_commission","auto_loop":true,"send_image":true,"random_delay":true,"jd_app_key":"","jd_app_secret":"","jd_union_id":"","jd_position_id":"","jd_site_id":"","monitor_forbidden_words":"","monitor_use_default_forbidden":true,"monitor_forward_original_when_unparsed":false,"monitor_keyword_replacements":"","monitor_source_group":"","monitor_source_qqs":"","monitor_target_groups":"","monitor_interval":3,"monitor_send_image":true,"github_owner":"","github_repo":"taoke-fadan","auto_check_update":true}' | Out-File -Encoding utf8 dist\config.json
+            # 仓库里没放 config.json 就用「干净默认模板」（全部空值，绝不带任何真实账号）
+            $cfg = @"
+          {
+            "appkey": "",
+            "sid": "",
+            "pid": "",
+            "napcat_host": "127.0.0.1",
+            "napcat_port": "3000",
+            "napcat_token": "",
+            "group_ids": "",
+            "interval": 600,
+            "min_commission": 30,
+            "min_sales": 100,
+            "min_price": 0,
+            "max_price": 9999,
+            "template_id": 1,
+            "source_type": "high_commission",
+            "auto_loop": $true,
+            "send_image": $true,
+            "random_delay": $true,
+            "jd_app_key": "",
+            "jd_app_secret": "",
+            "jd_union_id": "",
+            "jd_position_id": "",
+            "jd_site_id": "",
+            "monitor_forbidden_words": "",
+            "monitor_use_default_forbidden": $true,
+            "monitor_forward_original_when_unparsed": $false,
+            "monitor_keyword_replacements": "",
+            "monitor_source_group": "",
+            "monitor_source_qqs": "",
+            "monitor_target_groups": "",
+            "monitor_interval": 3,
+            "monitor_send_image": $true,
+            "github_owner": "${{ github.repository_owner }}",
+            "github_repo": "${{ github.event.repository.name }}",
+            "auto_check_update": $true
+          }
+          "@
+            $cfg | Out-File -Encoding utf8 dist\config.json
           }
 
-      # 6. 自动创建 GitHub Release 并上传 exe + config.json
-      - name: 创建 Release 并上传
+          # --- 5.2 使用说明.txt ---
+          $readme = @"
+          ============================================================
+           🐷 猪儿虫发单软件 ${{ github.ref_name }}    绿色EXE版（免Python · 粉小猪图标）
+          ============================================================
+
+          【本目录必须同时存在的 2 个文件，缺一不可】
+            1. 猪儿虫发单软件.exe    主程序（双击运行）
+            2. config.json           你的账号配置（折淘客/京东联盟/群号全在里面）
+
+          ========================================
+          【第一次使用 - 4 步走】
+          ========================================
+
+           [1] 先启动 NapCat 并用【QQ小号】扫码登录
+               NapCat 下载：https://github.com/NapNeko/NapCatQQ/releases
+               - NapCat 默认 HTTP API 端口 3000，不用改
+               - 小号一定要手动加入【上家主群】+【你所有发单群】，不能被禁言
+
+           [2] 双击「猪儿虫发单软件.exe」→ 输入激活码 → 进主界面
+               （窗口标题栏和任务栏应是粉小猪+红斗篷图标）
+
+           [3] 切到【⚙️ 配置】Tab：
+               ① 折淘客：填 AppKey/Sid/Pid → 点 🔗 测试折淘客API（应显示成功）
+               ② NapCat：Host=127.0.0.1、Port=3000、Token=（你自己设的）
+                        → 点 🤖 测试NapCat连接（应显示小号昵称）
+               ③ 京东联盟：发京东单才填（AppKey/Secret/UnionID/PositionID）
+               → 最后点 💾 保存配置
+
+           [4] 切回【👂 监听跟单】Tab（默认就是这一页）：
+               ① 源群号：填/选择上家的主群号
+               ② 监听QQ号：填 上家QQ（留空=监听群内所有人，填他一人最干净）
+               ③ 目标群号：填/选择 二三十个你的发单群（英文逗号分隔）
+               → 点顶栏 KPI 条最右侧的绿色大按钮【▶️ 启动监听】
+               ✅ 状态灯 灰→绿 = 启动成功，上家一发消息立刻出现在下面日志里
+
+          ========================================
+          【确认返利 100% 到你账户（必做一次，几块钱就行）】
+          ========================================
+            启动监听 → 等上家发商品 → 软件日志里出现新淘口令
+            → 用淘宝小号复制打开 → 下一单最便宜的
+            → 15~30 分钟后登录 https://pub.alimama.com/ → 效果报表 → 订单明细
+            → 订单里的 PID 是你自己的 mm_xxx_xxx_xxx = 佣金 100% 到你
+
+          ========================================
+          【在线升级流程】
+          ========================================
+            作者在 GitHub 打了新的 v 开头标签 → GitHub Actions 自动生成这个 Release
+            → 你打开软件时「检查更新」会自动发现新版本 → 下载 → 重启即升级完成 ✅
+            （不用手动再下载本页。这页只用来给「第一次安装」或「离线下载」的同学用。）
+
+          ============================================================
+          "@
+          $readme | Out-File -Encoding utf8 dist\使用说明.txt
+
+      # ================== 6. 创建 Release 并上传附件 ==================
+      - name: 🚀 自动创建 Release 并上传 EXE + config + 说明
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: 淘客全自动发单助手 ${{ github.ref_name }}
+          name: 🐷 猪儿虫发单软件 ${{ github.ref_name }}
           body: |
             ## 自动构建版本 ${{ github.ref_name }}
 
-            ### 升级方法
-            - 如果软件已运行：会自动弹窗提示更新，点确定即可
-            - 如果是新安装：下载下面的 exe + config.json 放同一文件夹，双击 exe 运行
+            ### 这一版本包含什么
+            - 方案B：精简跟单版（删除了原榜单发单功能，只保留监听+转链+转发核心）
+            - 标题：🐷 猪儿虫发单软件
+            - 图标：粉小猪 + 红色斗篷
+            - UI：顶部 KPI 条 + 启动监听大绿按钮 + 状态灯联动 + 违禁词/关键词替换
 
-            ### 文件说明
-            - `淘客全自动发单助手.exe` - 主程序（免安装Python）
-            - `config.json` - 配置文件模板（首次使用需要填你的AppKey/SID/PID）
+            ### 升级方法
+            - **已经安装并正在用的同学**：直接打开软件 → 点「⚙️ 配置」页 → 点「🔄 检查更新」，软件自动下载升级，**不用**手动下本页附件。
+            - **第一次安装**：下载下面 3 个附件放同一文件夹 → 双击「猪儿虫发单软件.exe」。
+
+            ### 附件说明
+            - `猪儿虫发单软件.exe`：主程序（免Python · 带粉小猪图标 · 单文件绿色版）
+            - `config.json`：配置文件模板（首次使用按模板填你的折淘客 / NapCat / 京东联盟账号）
+            - `使用说明.txt`：4 步上手 + 返利校验 + 常见问题（忘了怎么用就打开）
+
           files: |
-            dist/淘客全自动发单助手.exe
+            dist/猪儿虫发单软件.exe
             dist/config.json
+            dist/使用说明.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
