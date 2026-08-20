@@ -18,7 +18,7 @@ import urllib.request
 import urllib.error
 
 # 当前版本号（每次发布新版时改这里）
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.5"
 
 
 def get_update_info(github_owner="", github_repo=""):
