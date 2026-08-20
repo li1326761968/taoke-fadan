@@ -1787,12 +1787,16 @@ if __name__ == "__main__":
     app = FadanApp(root)
     # 启动时自动检查更新（静默，有新版才弹框）
     if app.config.get("auto_check_update", True) and get_update_info is not None:
-        try:
-            owner = app.config.get("github_owner", "").strip()
-            repo = app.config.get("github_repo", "").strip()
-            if owner and repo:
+        def _delayed_check():
+            try:
+                owner = app.config.get("github_owner", "").strip()
+                repo = app.config.get("github_repo", "").strip()
+                if not owner or not repo:
+                    return  # 未配置升级地址，静默跳过
                 has_update, info = get_update_info(owner, repo)
-                if has_update and "error" not in info:
+                if "error" in info:
+                    return  # 网络错误等，静默跳过
+                if has_update:
                     remote_ver = info.get("version", "?")
                     notes = info.get("notes", "")
                     size_mb = info.get("download_size", 0) / 1024 / 1024
@@ -1804,6 +1808,8 @@ if __name__ == "__main__":
                         f"现在升级吗？（软件将关闭重启）"
                     ):
                         app.check_update()
-        except Exception:
-            pass  # 启动检查失败不影响正常使用
+            except Exception:
+                pass  # 启动检查失败不影响正常使用
+        # 延迟3秒检查，等窗口完全加载
+        root.after(3000, _delayed_check)
     root.mainloop()
