@@ -599,11 +599,16 @@ class FadanApp:
                   font=("", 10, "bold")).grid(row=8, column=0, columnspan=4, sticky="w", pady=(15, 5), padx=5)
 
         ttk.Label(fc, text="QQ群号:").grid(row=9, column=0, sticky="e", padx=5, pady=3)
-        self.entry_groups = ttk.Entry(fc, width=65)
-        self.entry_groups.grid(row=9, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        grp_frame = ttk.Frame(fc)
+        grp_frame.grid(row=9, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.entry_groups = ttk.Entry(grp_frame)
+        self.entry_groups.pack(side="left", fill="x", expand=True)
         self.entry_groups.insert(0, self.config["group_ids"])
+        ttk.Button(grp_frame, text="📋 选择群",
+                   command=lambda: self.open_group_picker(self.entry_groups, "选择发单目标群")
+                   ).pack(side="left", padx=(5, 0))
 
-        ttk.Label(fc, text="多个群用英文逗号分隔，如: 123456,789012（建议你有二三十个群就都填这里）",
+        ttk.Label(fc, text="多个群用英文逗号分隔，或点「选择群」自动获取群列表",
                   foreground="gray").grid(row=10, column=1, columnspan=3, sticky="w", padx=5)
 
         # 发单规则
@@ -817,9 +822,14 @@ class FadanApp:
                   font=("", 10, "bold")).grid(row=1, column=0, columnspan=4, sticky="w", padx=10, pady=(10, 5))
 
         ttk.Label(fm, text="源群号:").grid(row=2, column=0, sticky="e", padx=5, pady=3)
-        self.entry_monitor_source_group = ttk.Entry(fm, width=34)
-        self.entry_monitor_source_group.grid(row=2, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        src_frame = ttk.Frame(fm)
+        src_frame.grid(row=2, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.entry_monitor_source_group = ttk.Entry(src_frame)
+        self.entry_monitor_source_group.pack(side="left", fill="x", expand=True)
         self.entry_monitor_source_group.insert(0, self.config.get("monitor_source_group", ""))
+        ttk.Button(src_frame, text="📋 选择群",
+                   command=lambda: self.open_group_picker(self.entry_monitor_source_group, "选择监听源群（上家群）")
+                   ).pack(side="left", padx=(5, 0))
 
         ttk.Label(fm, text="监听QQ号:").grid(row=3, column=0, sticky="e", padx=5, pady=3)
         self.entry_monitor_qqs = ttk.Entry(fm, width=70)
@@ -834,11 +844,16 @@ class FadanApp:
                   font=("", 10, "bold")).grid(row=5, column=0, columnspan=4, sticky="w", padx=10, pady=(15, 5))
 
         ttk.Label(fm, text="目标群号:").grid(row=6, column=0, sticky="e", padx=5, pady=3)
-        self.entry_monitor_target = ttk.Entry(fm, width=70)
-        self.entry_monitor_target.grid(row=6, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        tgt_frame = ttk.Frame(fm)
+        tgt_frame.grid(row=6, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.entry_monitor_target = ttk.Entry(tgt_frame)
+        self.entry_monitor_target.pack(side="left", fill="x", expand=True)
         self.entry_monitor_target.insert(0, self.config.get("monitor_target_groups", ""))
+        ttk.Button(tgt_frame, text="📋 选择群",
+                   command=lambda: self.open_group_picker(self.entry_monitor_target, "选择转发目标群（你的发单群）")
+                   ).pack(side="left", padx=(5, 0))
 
-        ttk.Label(fm, text="多个群用英文逗号分隔；可以和Tab1里的发单群保持一致",
+        ttk.Label(fm, text="多个群用英文逗号分隔；可以和配置页的群号保持一致",
                   foreground="gray").grid(row=7, column=1, columnspan=3, sticky="w", padx=5)
 
         # 高级
@@ -1149,6 +1164,163 @@ A: 这就是这个开关的"原样转发"行为。建议要么把监听QQ号精�
             self.log(f"  • {gname}  (群号={gid}, 人数={member_cnt})")
             ids.append(str(gid))
         self.log(f"👉 群号(可复制): {','.join(ids)}")
+
+    def open_group_picker(self, target_entry, title="选择QQ群"):
+        """
+        弹出群选择窗口，获取NapCat群列表，用户可勾选群，
+        确定后把选中的群号（逗号分隔）填入 target_entry。
+        target_entry: ttk.Entry 控件
+        """
+        self.save_config()
+        sender = NapCatSender(self.config["napcat_host"],
+                              int(self.config["napcat_port"] or 3000),
+                              self.config["napcat_token"])
+        ok, _ = sender.check_connection()
+        if not ok:
+            messagebox.showerror("NapCat未连接", "请先确保NapCat已启动并登录，\n然后在配置页点「测试NapCat」按钮确认连接成功。")
+            return
+        groups = sender.get_group_list()
+        if not groups:
+            messagebox.showinfo("无群列表", "未获取到任何群。检查该QQ号是否加群，或NapCat版本返回格式不同。")
+            return
+
+        # 当前已选中的群号集合
+        cur_text = target_entry.get().strip()
+        cur_ids = set()
+        for s in cur_text.replace("，", ",").split(","):
+            s = s.strip()
+            if s:
+                cur_ids.add(s)
+
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("620x520")
+        win.transient(self.root)
+        win.grab_set()
+
+        # 搜索栏
+        top_frame = ttk.Frame(win)
+        top_frame.pack(fill="x", padx=10, pady=(10, 5))
+        ttk.Label(top_frame, text="搜索:").pack(side="left")
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(top_frame, textvariable=search_var, width=30)
+        search_entry.pack(side="left", padx=5)
+        search_entry.focus()
+
+        # 全选/全不选
+        def select_all():
+            for item_id in tree.get_children():
+                tree.set(item_id, "check", "☑")
+        def deselect_all():
+            for item_id in tree.get_children():
+                tree.set(item_id, "check", "")
+
+        ttk.Button(top_frame, text="全选", command=select_all).pack(side="left", padx=(10, 2))
+        ttk.Button(top_frame, text="全不选", command=deselect_all).pack(side="left", padx=2)
+
+        # 列表区域
+        tree_frame = ttk.Frame(win)
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        tree = ttk.Treeview(tree_frame, columns=("check", "gid", "gname", "count"),
+                           show="headings", height=18)
+        tree.heading("check", text="选")
+        tree.heading("gid", text="群号")
+        tree.heading("gname", text="群名称")
+        tree.heading("count", text="人数")
+        tree.column("check", width=40, anchor="center", stretch=False)
+        tree.column("gid", width=140, anchor="center", stretch=False)
+        tree.column("gname", width=300, anchor="w", stretch=False)
+        tree.column("count", width=80, anchor="center", stretch=False)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        # 存储所有群数据 rowid -> (gid, gname)
+        all_items = []
+
+        def populate(filter_text=""):
+            tree.delete(*tree.get_children())
+            all_items.clear()
+            ft = filter_text.lower().strip()
+            for g in groups:
+                gid = str(g.get("group_id", ""))
+                gname = g.get("group_name", "") or g.get("group_name", "")
+                member_count = g.get("member_count", 0) or 0
+                if ft and ft not in gname.lower() and ft not in gid:
+                    continue
+                check_val = "☑" if gid in cur_ids else ""
+                rid = tree.insert("", "end", values=(check_val, gid, gname, member_count))
+                all_items.append((rid, gid, gname))
+
+        def on_search(*args):
+            populate(search_var.get())
+
+        search_var.trace_add("write", on_search)
+        populate()
+
+        # 点击行切换勾选
+        def on_click(event):
+            region = tree.identify("region", event.x, event.y)
+            if region != "cell":
+                return
+            col = tree.identify_column(event.x)
+            if col != "#1":  # 只在点击"选"列时切换
+                return
+            item = tree.identify_row(event.y)
+            if not item:
+                return
+            cur = tree.set(item, "check")
+            tree.set(item, "check", "" if cur == "☑" else "☑")
+
+        tree.bind("<Button-1>", on_click)
+
+        # 双击行也切换勾选
+        def on_double_click(event):
+            item = tree.identify_row(event.y)
+            if not item:
+                return
+            cur = tree.set(item, "check")
+            tree.set(item, "check", "" if cur == "☑" else "☑")
+
+        tree.bind("<Double-Button-1>", on_double_click)
+
+        # 底部确认按钮
+        bottom = ttk.Frame(win)
+        bottom.pack(fill="x", padx=10, pady=(5, 10))
+        selected_count_lbl = ttk.Label(bottom, text="已选: 0 个群")
+        selected_count_lbl.pack(side="left")
+
+        def update_count(*args):
+            cnt = sum(1 for rid in tree.get_children() if tree.set(rid, "check") == "☑")
+            selected_count_lbl.config(text=f"已选: {cnt} 个群")
+
+        tree.bind("<<TreeviewSelect>>", update_count)
+
+        def on_confirm():
+            selected = []
+            for rid in tree.get_children():
+                if tree.set(rid, "check") == "☑":
+                    vals = tree.item(rid, "values")
+                    selected.append(str(vals[1]))  # gid
+            if not selected:
+                messagebox.showwarning("未选择", "请至少勾选一个群。", parent=win)
+                return
+            result = ",".join(selected)
+            target_entry.delete(0, "end")
+            target_entry.insert(0, result)
+            self.log(f"✅ 已选择 {len(selected)} 个群: {result}")
+            win.destroy()
+
+        ttk.Button(bottom, text="确定", command=on_confirm).pack(side="right", padx=(5, 0))
+        ttk.Button(bottom, text="取消", command=win.destroy).pack(side="right")
+
+        win.update_idletasks()
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - win.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - win.winfo_height()) // 2
+        win.geometry(f"+{max(0,x)}+{max(0,y)}")
 
     # =========================================================
     # 发单核心
