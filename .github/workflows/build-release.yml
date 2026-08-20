@@ -1,0 +1,80 @@
+# =============================================================
+# GitHub Actions 自动打包发布
+# 触发条件：推送一个 v 开头的 tag（如 v1.0.1）
+# 效果：GitHub 服务器自动在 Windows 环境打包 exe → 自动创建 Release → 上传 exe
+# 用户软件检测到新版本后自动下载升级
+# =============================================================
+name: 打包发布EXE
+
+on:
+  push:
+    tags:
+      - 'v*'  # 匹配 v1.0.0 / v1.0.1 / v2.0.0 等
+
+jobs:
+  build:
+    runs-on: windows-latest  # GitHub 免费提供 Windows 服务器
+
+    steps:
+      # 1. 拉取代码
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      # 2. 安装 Python
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. 安装依赖
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pyinstaller
+
+      # 4. 打包 exe（复用现有的 PyInstaller 命令）
+      - name: 打包 EXE
+        run: |
+          pyinstaller --noconfirm --clean --noupx `
+            --onefile --windowed `
+            --name "淘客全自动发单助手" `
+            --hidden-import=zhetaoke_api `
+            --hidden-import=copy_generator `
+            --hidden-import=napcat_sender `
+            --hidden-import=qq_monitor `
+            --hidden-import=jd_union_api `
+            --hidden-import=auto_updater `
+            --hidden-import=license `
+            main.py
+
+      # 5. 把 config.json 复制到 dist（作为 Release 附件一起发布）
+      - name: 复制 config.json
+        run: |
+          if (Test-Path config.json) {
+            Copy-Item config.json dist\config.json
+          } else {
+            # 如果没有 config.json，生成一个默认的（不含敏感信息）
+            '{"appkey":"","sid":"","pid":"","napcat_host":"127.0.0.1","napcat_port":"3000","napcat_token":"","group_ids":"","interval":600,"min_commission":30,"min_sales":100,"min_price":0,"max_price":9999,"template_id":1,"source_type":"high_commission","auto_loop":true,"send_image":true,"random_delay":true,"jd_app_key":"","jd_app_secret":"","jd_union_id":"","jd_position_id":"","jd_site_id":"","monitor_forbidden_words":"","monitor_use_default_forbidden":true,"monitor_forward_original_when_unparsed":false,"monitor_keyword_replacements":"","monitor_source_group":"","monitor_source_qqs":"","monitor_target_groups":"","monitor_interval":3,"monitor_send_image":true,"github_owner":"","github_repo":"taoke-fadan","auto_check_update":true}' | Out-File -Encoding utf8 dist\config.json
+          }
+
+      # 6. 自动创建 GitHub Release 并上传 exe + config.json
+      - name: 创建 Release 并上传
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: 淘客全自动发单助手 ${{ github.ref_name }}
+          body: |
+            ## 自动构建版本 ${{ github.ref_name }}
+
+            ### 升级方法
+            - 如果软件已运行：会自动弹窗提示更新，点确定即可
+            - 如果是新安装：下载下面的 exe + config.json 放同一文件夹，双击 exe 运行
+
+            ### 文件说明
+            - `淘客全自动发单助手.exe` - 主程序（免安装Python）
+            - `config.json` - 配置文件模板（首次使用需要填你的AppKey/SID/PID）
+          files: |
+            dist/淘客全自动发单助手.exe
+            dist/config.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
