@@ -221,8 +221,8 @@ class FadanApp:
     # =========================================================
     # 折淘客授权 / 全局刷新
     # =========================================================
-    ZHETAOKE_AUTH_URL = "https://www.zhetaoke.com/user/admin_all.php?route=user.account.login"
-    ZHETAOKE_AUTH_MANAGE_URL = "https://www.zhetaoke.com/user/admin_all.php?route=tutorial.extend_lifespan"
+    ZHETAOKE_AUTH_URL = "https://www.zhetaoke.com/user/login.aspx"
+    ZHETAOKE_AUTH_MANAGE_URL = "https://www.zhetaoke.com/user/shouquan.html"
 
     def open_zhetaoke_auth(self):
         """打开折淘客授权页面：浏览器自动跳到登录+授权流程。
