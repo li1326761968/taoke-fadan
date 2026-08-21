@@ -1,7 +1,6 @@
 """
-折淘客 API 模块
+淘宝联盟 API 模块
 负责：获取高佣商品列表、9.9包邮、全天销量榜、高评分、高佣转链、生成淘口令
-折淘客文档：https://www.zhetaoke.com/help/
 """
 import requests
 import json
@@ -39,7 +38,7 @@ class ZhetaokeAPI:
                 last_err = str(e)
                 continue
         if last_err:
-            print(f"[折淘客API] {path} 失败: {last_err}")
+            print(f"[淘宝联盟API] {path} 失败: {last_err}")
         return []
 
     # ========== 商品列表接口 ==========
@@ -138,18 +137,59 @@ class ZhetaokeAPI:
             result = self._get("api_all.ashx", params)
         return result
 
+    # ========== 自动获取SID ==========
+    def auto_get_sid(self):
+        """用AppKey自动获取已授权的SID（折淘客 open_gaoyonglian.ashx / open_sid 接口）
+        授权完成后SID会自动绑定到AppKey下，这里自动拉取最新的SID。
+        成功返回 sid 字符串，失败返回 None。
+        """
+        if not self.appkey:
+            return None
+        # 折淘客获取SID列表接口
+        result = self._get("open_gaoyonglian.ashx", {
+            "appkey": self.appkey,
+        })
+        if isinstance(result, list) and result:
+            # 取第一个SID
+            item = result[0]
+            sid = item.get("sid") or item.get("s_id") or ""
+            if sid:
+                self.sid = sid  # 自动更新内存中的sid
+                print(f"[淘宝联盟API] 自动获取SID成功: {sid[:8]}...")
+                return sid
+        # 备用：尝试 open_sid.ashx
+        result2 = self._get("open_sid.ashx", {
+            "appkey": self.appkey,
+        })
+        if isinstance(result2, list) and result2:
+            item = result2[0]
+            sid = item.get("sid") or item.get("s_id") or ""
+            if sid:
+                self.sid = sid
+                print(f"[淘宝联盟API] 自动获取SID成功(备用): {sid[:8]}...")
+                return sid
+        print("[淘宝联盟API] 自动获取SID失败，请确认已完成授权")
+        return None
+
     # ========== 转链 / 淘口令 ==========
     def convert_link(self, num_iid, content_id=None):
         """
         高佣转链 + 生成淘口令 (open_gaoyongzhuanlian.ashx)
         signurl=5: 一次性返回转链(含tkl)+推广链接+商品详情
-        :param num_iid: 折淘客 tao_id / 淘宝纯数字 num_iid 都支持
+        :param num_iid: 商品ID / 淘宝纯数字 num_iid 都支持
         :param content_id: 渠道ID（如有）
         :return: 成功→ dict（含 tkl / coupon_click_url / shorturl / title 等）
                  失败→ None（调用方会打印详细原因）
         """
+        # 如果没有SID，先自动获取
+        if not self.sid:
+            self.auto_get_sid()
+        if not self.sid:
+            print("[淘宝联盟API] 转链失败：无SID，请先点「去授权」完成授权")
+            return None
+
         params = {
-            "appkey": self.appkey,   # 必须带！折淘客所有接口都要 appkey
+            "appkey": self.appkey,
             "sid": self.sid,
             "pid": self.pid,
             "num_iid": num_iid,
@@ -183,7 +223,7 @@ class ZhetaokeAPI:
                 continue  # 异常（超时/网络）再试下一个地址
 
         if last_err:
-            print(f"[折淘客API] 转链失败 num_iid={num_iid}: {last_err}")
+            print(f"[淘宝联盟API] 转链失败 num_iid={num_iid}: {last_err}")
         return None
 
     def get_product_detail(self, num_iid):
@@ -199,7 +239,7 @@ class ZhetaokeAPI:
         用淘口令或链接查询商品ID（转链接口 signurl=5 如果传入 content=tkl 也可解析，
         这里优先用 api_detail 解析失败则返回空）
         """
-        # 折淘客没有专门的"淘口令反查"免费接口，直接返回空让上层 fallback
+        # 没有专门的"淘口令反查"免费接口，直接返回空让上层 fallback
         return None
 
 

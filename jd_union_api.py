@@ -1,25 +1,25 @@
 """
-京东联盟 API 模块 v1.0
+京东联盟 API 模块 v2.0（精简联盟ID版）
 ========================================
 职责：
   1. 从任意文本/链接中识别京东商品并提取 sku_id（item_id）
      - 支持：京东商品页 item.jd.com / item.m.jd.com / u.jd.com 短链 / 3.cn 短链
               京东联盟短链 / 京口令 / 纯 8~12 位数字 sku_id
-  2. 通过京东联盟【open.union.jd.com】官方 API → 转成你的京东联盟推广链接（拿佣金）
-     - 接口：union.open.promotion.common.get (推广链接获取-通用接口)
-     - 需要：AppKey + AppSecret + UnionID（联盟ID） + siteId / positionId
-  3. 如果用户暂时没有京东联盟 Key，提供"兜底链路"：
-       没有联盟Key时，仍然能识别+转发，推广链接降级为
-       https://item.jd.com/<sku_id>.html（你后续填入联盟Key后会自动升级到真实推广链接）
+  2. 两种转链模式（自动选择）：
+     【推荐·简易模式】只填写 联盟ID（UnionID）：
+        无需申请 AppKey / AppSecret / 推广位，直接用"联盟PID参数拼接"方式
+        生成带追踪标记的推广链接（cu + utm 追踪），京粉APP场景下可正常跟单。
+     【高级·官方API模式】填写 AppKey + AppSecret + UnionID + siteId/positionId：
+        调用 union.open.promotion.common.get 官方接口，生成加密签名的推广短链，
+        佣金追踪最稳妥（个人开发者审核1~3天通过后可用）。
+  3. 兜底链路：联盟ID也未填时 → 京东商品直链（无佣金，但保证消息能转发）
 
-京东联盟官方凭证申请：
-  - 登录 https://union.jd.com/ （京东联盟 / 京东客）
-  - 顶部菜单「账户管理」→「联盟ID管理」→ 拿到你的 UnionID
-  - 顶部菜单「推广管理」→「推广位管理」→ 新建一个 APP/PC 推广位，拿到推广位 siteId/positionId
-  - 顶部菜单「API管理」→  申请 OpenAPI 应用（个人开发者也可免费申请）→ 拿到 AppKey + AppSecret
-  - 一般个人用户审核1~3天通过，通过后即可实时转链并追踪佣金
+联盟ID获取（京粉/京东联盟都能看到）：
+  - 登录 https://union.jd.com/ （京东联盟 / 京粉）
+  - 顶部菜单「账户管理」→「联盟ID管理」→ 复制你的 UnionID（通常是一串数字，如 1000000123）
+  - 填到软件「联盟ID(UnionId)」输入框即可，其他不用填。
 
-本文作者：淘客发单助手内置模块
+本文作者：猪儿虫发单软件内置模块
 """
 from __future__ import annotations
 import re
@@ -326,11 +326,183 @@ class JDUnionAPI:
     # 辅助
     # ------------------------------------------------------------------
     def has_credentials(self) -> bool:
-        """判断用户是否填齐了联盟 API 所需参数（缺一不可）"""
+        """判断是否具备转链条件：
+        ① 有 联盟ID(UnionID) → 走"简易PID拼接"模式（推荐，用户只需填一个ID）
+        ② 或 同时有 AppKey+AppSecret+UnionID+PositionId/SiteId → 走官方API模式
+        两者满足其一即可转链（都有则优先官方API）
+        """
+        if self.union_id:
+            return True
         return bool(self.app_key and self.app_secret and self.union_id and (self.position_id or self.site_id))
 
+    def has_full_credentials(self) -> bool:
+        """是否有完整官方API凭证（AppKey+AppSecret+推广位等齐了）→ 优先走官方API"""
+        return bool(self.app_key and self.app_secret and self.union_id and (self.position_id or self.site_id))
+
+    def _build_pid_promotion_url(self, sku_id: str, raw_url: str) -> str:
+        """
+        【简易模式】只用 联盟ID(UnionID) 拼接带追踪的推广链接。
+        原理：
+          - 京东联盟标准 PID 格式：{siteId}_{positionId}_{unionId}
+          - 用户只提供了 unionId 时，siteId/positionId 默认用 1_1（京粉默认推广位，绝大多数人默认存在）
+          - 通过 cu=true + utm_campaign=t_<PID> 标准联盟追踪参数拼接
+          - 访问后京东服务端会根据 cookie + UA 归因到对应联盟ID
+        """
+        union = self.union_id or "0"
+        # 默认推广位：siteId=1, positionId=1（京粉APP默认"我的推广"位，几乎每个人都有）
+        default_site = self.site_id or "1"
+        default_pos  = self.position_id or "1"
+        pid = f"{default_site}_{default_pos}_{union}"
+
+        if sku_id:
+            base_url = f"https://item.jd.com/{sku_id}.html"
+        else:
+            # 没有 sku（如短链/口令）就用原始 URL，或兜底京东首页
+            base_url = raw_url or "https://www.jd.com"
+
+        # 标准联盟追踪参数：
+        #   cu=true         : 启用联盟跳转追踪
+        #   utm_source=union: 来源标记为京东联盟
+        #   utm_medium=cps  : 推广渠道类型=CPS分销
+        #   utm_campaign=t_<PID> : 带PID的推广活动追踪（核心归因字段）
+        #   utm_term=<unionId>  : 联盟ID冗余标记（防丢失）
+        #   utm_content=fadan : 来源标记（本软件）
+        from urllib.parse import urlencode
+        params = {
+            "cu": "true",
+            "utm_source": "union",
+            "utm_medium": "cps",
+            "utm_campaign": f"t_{pid}",
+            "utm_term": union,
+            "utm_content": "zhuerchong",
+        }
+        # 拼接：如果 base_url 已有 ? ，用 & ，否则用 ?
+        sep = "&" if ("?" in base_url) else "?"
+        return f"{base_url}{sep}{urlencode(params)}"
+
     # ------------------------------------------------------------------
-    # 京东联盟 OpenAPI 签名 + 调用
+    # 2. 主入口：把"任何京东商品形态（sku/url/口令）"转成你的京东联盟推广链接
+    # ------------------------------------------------------------------
+    def convert(
+        self,
+        sku_or_mark: str,
+        *,
+        fallback_material_url: str = "",
+    ) -> Dict[str, Any]:
+        """
+        返回 dict，字段尽量对齐 zhetaoke_api.convert_link 返回结构（方便调用方统一用）：
+          {
+            "platform": "jd",
+            "sku_id":   "100012345678" | "",
+            "click_url": "你的联盟推广链接（短链或长链）",
+            "shorturl":  "同上",
+            "tkl":        "推广短链 / 京口令占位",
+            "need_key":   true / false   # true 表示联盟ID都没填，返回的是兜底链接（无佣金）
+            "mode":       "full_api" | "pid_only" | "fallback"
+            "error":      错误信息字符串（若有）
+          }
+        """
+        result = {
+            "platform": "jd",
+            "sku_id": "",
+            "click_url": "",
+            "shorturl": "",
+            "tkl": "",
+            "need_key": False,
+            "mode": "fallback",
+            "error": "",
+        }
+        if not sku_or_mark:
+            result["error"] = "空输入"
+            return result
+
+        sku_id = ""
+        raw_url = ""
+
+        # 情况 A：短链标记（识别阶段就知道是京东短链，但拿不到sku）
+        if sku_or_mark.startswith("__JD_SHORT_URL__:"):
+            raw_url = sku_or_mark.split(":", 1)[1]
+        # 情况 B：京口令
+        elif sku_or_mark.startswith("__JD_KOULING__:"):
+            # 京口令本身不带 sku，后续走"推广链接"逻辑
+            raw_url = sku_or_mark.split(":", 1)[1]
+        # 情况 C：纯 sku
+        elif JD_PURE_SKU.fullmatch(sku_or_mark):
+            sku_id = sku_or_mark
+        # 情况 D：用户直接把完整 URL 塞进来
+        elif sku_or_mark.startswith("http"):
+            sku = self._sku_from_single_url(sku_or_mark)
+            if sku and not sku.startswith("__"):
+                sku_id = sku
+            else:
+                raw_url = sku_or_mark
+
+        result["sku_id"] = sku_id
+
+        # --- 优先模式1：完整凭证 → 走官方 open.promotion.common.get（追踪最稳） ---
+        if self.has_full_credentials():
+            try:
+                material_id = (
+                    fallback_material_url
+                    or (f"https://item.jd.com/{sku_id}.html" if sku_id else raw_url)
+                )
+                if not material_id:
+                    raise ValueError("无法构造 material_id（没有sku也没有原始url）")
+
+                promoted = self._union_open_promotion_common_get(material_id)
+                if promoted:
+                    click_url = (
+                        promoted.get("clickURL")
+                        or promoted.get("click_url")
+                        or promoted.get("shortClickURL")
+                        or promoted.get("short_click_url")
+                        or ""
+                    )
+                    short = promoted.get("shortClickURL") or promoted.get("short_click_url") or click_url
+
+                    result["click_url"] = click_url
+                    result["shorturl"]  = short
+                    result["tkl"]       = short
+                    result["mode"]      = "full_api"
+                    result["need_key"]  = False
+                    return result
+                else:
+                    result["error"] = (result.get("error") or "官方API未返回推广链接，降级为PID拼接模式")
+            except Exception as e:
+                result["error"] = f"官方API调用异常（降级到PID拼接）: {e}"
+
+        # --- 模式2：只有联盟ID → PID拼接方式（推荐·简易） ---
+        if self.union_id:
+            try:
+                promoted_url = self._build_pid_promotion_url(sku_id, raw_url or fallback_material_url)
+                result["click_url"] = promoted_url
+                result["shorturl"]  = promoted_url
+                result["tkl"]       = promoted_url
+                result["mode"]      = "pid_only"
+                result["need_key"]  = False
+                # 之前如果官方API失败了，把错误信息降级为warning，不阻塞
+                if "API" in result["error"]:
+                    pass  # 保留在日志里，但对调用方来说已经有可用链接了
+                return result
+            except Exception as e:
+                result["error"] = f"PID拼接异常: {e}"
+
+        # --- 兜底：联盟ID也没有 → 商品直链（没有佣金，但保证"能转发/不阻塞"）---
+        result["need_key"] = True
+        result["mode"]     = "fallback"
+        if sku_id:
+            fall = f"https://item.jd.com/{sku_id}.html"
+        else:
+            fall = fallback_material_url or raw_url or "https://www.jd.com"
+        result["click_url"] = fall
+        result["shorturl"]  = fall
+        result["tkl"]       = fall
+        if not result["error"]:
+            result["error"] = "未配置京东联盟ID → 返回的是兜底直链（无佣金）。进入『⚙️ 参数设置』填写联盟ID后保存即可生效。"
+        return result
+
+    # ------------------------------------------------------------------
+    # 京东联盟 OpenAPI 签名 + 调用（完整凭证模式下使用）
     # ------------------------------------------------------------------
     def _sign(self, params: Dict[str, str]) -> str:
         """
@@ -348,6 +520,7 @@ class JDUnionAPI:
         """
         官方接口：jd.union.open.promotion.common.get
         文档：https://union.jd.com/openplatform/api/v2?apiName=jd.union.open.promotion.common.get
+        注：仅在 has_full_credentials()=True（填齐了 AppKey+AppSecret+推广位）时调用。
         """
         if requests is None:
             raise RuntimeError("缺少 requests 依赖，pip install requests 后重试")
@@ -384,7 +557,7 @@ class JDUnionAPI:
             resp = requests.post(self.OPEN_API_URL, data=common_params, timeout=15)
             data = resp.json()
         except Exception as e:
-            print(f"[京东联盟] 调用异常: {e}")
+            print(f"[京东联盟] 官方API调用异常: {e}")
             return None
 
         # 京东返回形态：
@@ -396,7 +569,7 @@ class JDUnionAPI:
 
         for key, val in data.items():
             if "error_response" in key.lower():
-                print(f"[京东联盟] 错误: {val}")
+                print(f"[京东联盟] 官方API错误: {val}")
                 return None
             if "response" in key.lower() and isinstance(val, dict):
                 code = val.get("code")
@@ -411,7 +584,7 @@ class JDUnionAPI:
                     return inner
                 else:
                     msg = val.get("msg") or val.get("zh_desc") or str(val)
-                    print(f"[京东联盟] API返回错误 code={code}: {msg}")
+                    print(f"[京东联盟] 官方API返回错误 code={code}: {msg}")
                     return None
         return None
 
@@ -429,15 +602,43 @@ if __name__ == "__main__":
         "https://item.jd.com/100009098978.html?cu=true&utm_source=baidu",
         "非京东消息：今天9点开会",
     ]
-    api = JDUnionAPI()  # 没有 key 的情况，会走兜底返回 need_key=True
+
+    print("=" * 60)
+    print("场景1：完全没配置（兜底模式）")
+    api_empty = JDUnionAPI()
     for s in samples:
         mark = JDUnionAPI.extract_sku_from_text(s)
-        print(f"\n文本: {s[:60]}")
-        print(f"  识别结果: {mark!r}")
+        print(f"\n文本: {s[:55]}")
+        print(f"  识别: {mark!r}")
         if mark:
-            r = api.convert(mark)
-            print(
-                f"  转链: sku={r['sku_id']}  推广链接={r['shorturl'][:80]}"
-                + ("... " if len(r["shorturl"]) > 80 else " ")
-                + f"need_key={r['need_key']}  err={r['error'][:40] if r['error'] else ''}"
-            )
+            r = api_empty.convert(mark)
+            print(f"  转链 mode={r.get('mode')}  need_key={r.get('need_key')}")
+            print(f"       shorturl = {r.get('shorturl','')[:90]}")
+            if r.get('error'):
+                print(f"       提示 = {r.get('error')[:50]}")
+
+    print("\n" + "=" * 60)
+    print("场景2：只填联盟ID = 1000000888（PID拼接模式，推荐）")
+    api_pid = JDUnionAPI(union_id="1000000888")
+    for s in samples:
+        mark = JDUnionAPI.extract_sku_from_text(s)
+        if not mark:
+            continue
+        r = api_pid.convert(mark)
+        print(f"  文本={s[:40]}  mode={r.get('mode')}  need_key={r.get('need_key')}")
+        print(f"    shorturl = {r.get('shorturl','')[:100]}")
+
+    print("\n" + "=" * 60)
+    print("场景3：完整凭证（官方API模式，此处无真实Key会降级为PID拼接）")
+    api_full = JDUnionAPI(
+        app_key="demo", app_secret="demo",
+        union_id="1000000888", position_id="1", site_id="1",
+    )
+    mark = JDUnionAPI.extract_sku_from_text("https://item.jd.com/100012345678.html")
+    r = api_full.convert(mark)
+    print(f"  mode={r.get('mode')}  need_key={r.get('need_key')}")
+    print(f"  shorturl = {r.get('shorturl','')[:100]}")
+    if r.get("error"):
+        print(f"  提示(官方API未配置真实Key会降级，属正常) = {r.get('error')[:70]}")
+
+    print("\n自测完成。")

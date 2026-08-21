@@ -14,8 +14,9 @@ import random
 
 
 class CopyGenerator:
-    def __init__(self, template_id=1):
+    def __init__(self, template_id=1, tkl_symbol="￥"):
         self.template_id = int(template_id or 1)
+        self.tkl_symbol = tkl_symbol or "￥"
         self.tb_templates = {
             1: self._tb_standard,
             2: self._tb_urgent,
@@ -35,7 +36,7 @@ class CopyGenerator:
     def generate(self, product, converted=None, *, raw_text: str = ""):
         """
         生成发单文案
-        :param product:   折淘客返回的商品数据（监听跟单可传 None/{}）
+        :param product:   转链接口返回的商品数据（监听跟单可传 None/{}）
         :param converted: 转链结果 dict（zhetaoke_api.convert_link 或 jd_union_api.convert）
         :param raw_text:  监听跟单时的上家原消息文本（当需要"原文转发"时，外部会直接用，这里仅当渲染兜底）
         """
@@ -85,10 +86,21 @@ class CopyGenerator:
     # 淘宝：模板 1~4 原版（和原行为等价，稍做字段兼容健壮性升级）
     # ============================================================
     def _get_tb_tkl(self, c):
-        return (
-            self.pick(c, "tkl", "taokouling")
-            or "￥淘口令生成失败，请检查SID/PID授权￥"
-        )
+        """获取淘口令，如果API返回的口令符号和用户配置的不同，替换之"""
+        tkl = self.pick(c, "tkl", "taokouling")
+        if not tkl:
+            return f"{self.tkl_symbol}淘口令生成失败，请检查SID/PID授权{self.tkl_symbol}"
+        # 如果用户配置了自定义口令符号，替换API返回的默认￥符号
+        if self.tkl_symbol != "￥":
+            # 替换首尾的￥（不管有几个）
+            tkl = tkl.strip()
+            for sym in ("￥", "¥", "€", "₴", "₤"):
+                if tkl.startswith(sym):
+                    tkl = tkl[1:]
+                if tkl.endswith(sym):
+                    tkl = tkl[:-1]
+            tkl = f"{self.tkl_symbol}{tkl}{self.tkl_symbol}"
+        return tkl
 
     def _get_tb_url(self, c):
         return self.pick(c, "coupon_click_url", "shorturl", "click_url")
@@ -219,7 +231,7 @@ class CopyGenerator:
         if need_key:
             lines.append("")
             lines.append("⚠️ 【未配置京东联盟账号】→ 以上是京东商品直链（不跟单、无佣金）。")
-            lines.append("   请在软件【配置页 → 京东联盟】填写 AppKey/AppSecret/UnionID/PositionId")
+            lines.append("   请在软件【配置页 → 京东联盟】填写联盟ID")
             lines.append("   保存后重启监听，即可转成你的推广链接。")
         return "\n".join(lines)
 

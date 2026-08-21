@@ -34,7 +34,7 @@ REQUIREMENTS  = "requirements.txt"
 ICON_ICO      = os.path.join("assets", "icon.ico")
 ASSETS_DIR    = "assets"
 
-# 当同目录下没找到 config.json 时，自动按模板新建一份（空的折淘客字段，让用户自己填更安全）
+# 当同目录下没找到 config.json 时，自动按模板新建一份（空的淘宝联盟字段，让用户自己填更安全）
 DEFAULT_CONFIG_BODY = """{
   "appkey": "",
   "sid": "",
@@ -319,7 +319,7 @@ class PackerApp:
                 if not assets_ok:
                     self._log("❌ 缺少粉小猪图标资源：找不到 assets\\icon.ico")
                 if not os.path.isfile(cfg_path):
-                    self._log("⚠️ 没找到 config.json → 已经自动新建了一份（折淘客/京东联盟字段留空等你填）。")
+                    self._log("⚠️ 没找到 config.json → 已经自动新建了一份（淘宝联盟/京东联盟字段留空等你填）。")
                     try:
                         with open(cfg_path, "w", encoding="utf-8") as f:
                             f.write(DEFAULT_CONFIG_BODY)
@@ -488,7 +488,7 @@ class PackerApp:
 
 【本目录必须同时存在的 2 个文件，缺一不可】
   1. {APP_NAME}.exe    主程序（双击运行，任务栏显示粉小猪图标）
-  2. config.json       你的账号配置（折淘客 / 京东联盟 / 群号 全在这里）
+  2. config.json       你的账号配置（淘宝联盟 / 京东联盟 / 群号 全在这里）
 
 ========================================
 【第一次使用 - 4 步走】
@@ -505,10 +505,10 @@ class PackerApp:
      → 主界面窗口标题 + 任务栏图标 = 粉小猪 + 红斗篷，就说明运行正常 ✅
 
  [3] 切到【⚙️ 配置】页（第二个Tab）：
-     ① 折淘客：AppKey / Sid / Pid  填完 → 点 🔗 测试折淘客API（应显示成功）
+     ① 淘宝联盟：AppKey / Sid / Pid  填完 → 点 🔗 测试淘宝API（应显示成功）
      ② NapCat：Host=127.0.0.1、Port=3000、Token=（你 NapCat 里设的）
               → 点 🤖 测试NapCat连接（应显示小号昵称）
-     ③ 京东联盟：发京东单才填（AppKey/Secret/UnionID/PositionID 4 个）
+     ③ 京东联盟：发京东单才填（联盟ID 一个即可）
               → 点 🧩 测试京东联盟API
      最后 → 点 💾 保存配置
 
@@ -543,7 +543,7 @@ class PackerApp:
     ③ 等一轮轮询（默认 3 秒）  ④ 看顶栏状态灯是不是绿色
 
  Q: 日志提示"转链失败"？
- A: 折淘客 AppKey/Sid/Pid 没填对 / 过期了。在配置页重填后保存 → 停止 → 再启动。
+ A: 淘宝联盟 AppKey/Sid/Pid 没填对 / 过期了。在配置页重填后保存 → 停止 → 再启动。
 
  Q: EXE 启动很卡 / 被杀软删？
  A: ① 把 EXE 加进 360/火绒/Defender 的白名单 / 信任区

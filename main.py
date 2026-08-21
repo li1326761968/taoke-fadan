@@ -4,7 +4,7 @@
 
 核心用途：
   监听一个"上家主群"里的商品消息 → 自动抓到淘口令/京东口令/链接/商品ID
-  → 调用折淘客 / 京东联盟 API 转成你自己的推广链（赚你的佣金）
+  → 调用淘宝联盟 / 京东联盟 API 转成你自己的推广链（赚你的佣金）
   → 批量转发到你自己的 N 个 QQ 发单群
 """
 import tkinter as tk
@@ -90,6 +90,7 @@ DEFAULT_CONFIG = {
     "monitor_forbidden_words": "",     # 违禁词，命中则本条消息直接丢弃（不转发）
     "monitor_use_default_forbidden": True,  # 是否叠加内置通用违禁词
     "monitor_forward_original_when_unparsed": False,  # 没识别到淘口令/京东口令时，是否原文转发
+    "tkl_symbol": "￥",                             # 淘宝口令符号（用户可自定义，如￥/¥/#等）
     "monitor_keyword_replacements": "",   # 关键词替换，每行一条 原词=>新词
     # ---- 自动升级配置 ----
     "github_owner": "",      # GitHub 用户名（如 your-username）
@@ -299,10 +300,11 @@ class FadanApp:
         return DEFAULT_CONFIG.copy()
 
     def save_config(self, silent=False):
-        # 折淘客
+        # 淘宝联盟（SID由授权后自动获取，用户不需要手动填）
         self.config["appkey"] = self.entry_appkey.get()
-        self.config["sid"] = self.entry_sid.get()
+        self.config["sid"] = self.config.get("sid", "")  # 保留自动获取的SID
         self.config["pid"] = self.entry_pid.get()
+        self.config["tkl_symbol"] = getattr(self, "entry_tkl_symbol", None) and self.entry_tkl_symbol.get() or self.config.get("tkl_symbol", "￥")
         # NapCat
         self.config["napcat_host"] = self.entry_napcat_host.get()
         self.config["napcat_port"] = self.entry_napcat_port.get()
@@ -319,12 +321,17 @@ class FadanApp:
         except ValueError:
             self.config["monitor_interval"] = 3
         self.config["monitor_send_image"] = self.var_monitor_image.get()
-        # 京东联盟
-        self.config["jd_app_key"]     = self.entry_jd_app_key.get()
-        self.config["jd_app_secret"]  = self.entry_jd_app_secret.get()
+        # 京东联盟（精简：仅主动保存联盟ID；AppKey等4字段从旧配置透传兼容，避免覆盖老用户已有值）
         self.config["jd_union_id"]    = self.entry_jd_union_id.get()
-        self.config["jd_position_id"] = self.entry_jd_position_id.get()
-        self.config["jd_site_id"]     = self.entry_jd_site_id.get()
+        # 下面4个为兼容字段：UI上不显示，不主动修改；老用户配置里的值原样保留
+        if "jd_app_key" not in self.config:
+            self.config["jd_app_key"] = self.entry_jd_app_key.get() or ""
+        if "jd_app_secret" not in self.config:
+            self.config["jd_app_secret"] = self.entry_jd_app_secret.get() or ""
+        if "jd_position_id" not in self.config:
+            self.config["jd_position_id"] = self.entry_jd_position_id.get() or ""
+        if "jd_site_id" not in self.config:
+            self.config["jd_site_id"] = self.entry_jd_site_id.get() or ""
         # 监听新规则
         self.config["monitor_forbidden_words"] = self.entry_monitor_forbidden.get("1.0", "end").strip()
         self.config["monitor_use_default_forbidden"] = self.var_monitor_default_forbid.get()
@@ -383,35 +390,68 @@ class FadanApp:
             messagebox.showinfo("保存成功", "配置已保存到 config.json")
 
     # =========================================================
-    # 折淘客授权 / 全局刷新
+    # 淘宝联盟授权 / 全局刷新
     # =========================================================
-    ZHETAOKE_AUTH_MANAGE_URL = "https://j.zhetaoke.com/user/shouquan.aspx"
+    # 官方授权跳转链接（点击后跳转淘宝授权页，有效期30天）
+    ZHETAOKE_AUTH_MANAGE_URL = (
+        "https://oauth.taobao.com/authorize?response_type=code&client_id=33902843&redirect_uri="
+        "http://v.zhetaoke.com:17711/api/open_taokeshouquan_return.ashx?appkey="
+        "e5658dc7aa69eb5617b9568d7ad3b327117b568c6cf72b5c5b24295a3859c939a211d66b7283073d69b26825313fc17aaaba935a441920b3b41ee9e1280a75ada9699841992e0221edbaf1d199420b9e5c145307290c67e7db02587b22d0a1aa03cbbd2b06e6d62138c1ecb174cd7b61"
+    )
     ZHETAOKE_REGISTER_URL = "https://www.zhetaoke.com/user/register.aspx"
 
     def open_zhetaoke_auth(self):
-        """打开折淘客淘宝联盟授权页面。
-        流程：① 打开折淘客授权管理页 → ② 点「新增授权」→ ③ 跳淘宝扫码授权 → ④ 回折淘客复制新SID
-        授权有效期30天，到期需重新授权。
+        """打开淘宝联盟授权页面。
+        流程：① 打开授权链接 → ② 用淘宝号扫码/登录 → ③ 点同意授权 → ④ 自动回跳，
+              若SID未自动获取到，等几分钟后点「测试淘宝API」即可。
+        授权有效期30天，到期需重新授权（否则淘宝转链失败）。
         """
         import webbrowser, datetime
         try:
             webbrowser.open(self.ZHETAOKE_AUTH_MANAGE_URL)
-            self.log("🔗 已打开折淘客「授权管理」页面（浏览器）")
-            self.log("   授权步骤：")
-            self.log("   ① 登录折淘客 → 点「授权管理」→ 点「新增授权」")
-            self.log("   ② 跳转到淘宝授权页，用淘宝账号登录或手机淘宝扫码")
-            self.log("   ③ 点「同意授权」→ 自动跳回折淘客")
-            self.log("   ④ 复制新的 SID 填回软件 → 点「💾 保存配置」")
+            self.log("🔗 已打开淘宝联盟授权页面（浏览器）")
+            self.log("   授权步骤（有效期30天，到期重新点一次）：")
+            self.log("   ① 用你挂联盟的淘宝号扫码/登录")
+            self.log("   ② 点「同意/授权」按钮 → 页面会自动回跳")
+            self.log("   ③ 授权完成后回到软件，检查授权状态是否变绿")
+            self.log("   ④ 授权完成后软件会自动获取SID，无需手动填写")
             # 记录今天为授权日期
             today = datetime.datetime.now().strftime("%Y-%m-%d")
             self.config["last_auth_date"] = today
             self.save_config(silent=True)
             self._refresh_auth_status_ui()
+            # 后台自动获取SID（授权完成后SID会自动绑定到AppKey）
+            self.log("   ⏳ 正在自动获取SID...")
+            self.root.after(3000, self._auto_fetch_sid)  # 3秒后尝试，给授权回调时间
         except Exception as e:
             messagebox.showerror(
                 "打开失败",
                 f"无法自动打开浏览器，请手动复制链接到浏览器：\n\n{self.ZHETAOKE_AUTH_MANAGE_URL}\n\n错误: {e}"
             )
+
+    def _auto_fetch_sid(self):
+        """后台线程：用AppKey自动获取SID，获取成功后自动回填到config"""
+        import threading
+        def _do():
+            try:
+                from zhetaoke_api import ZhetaokeAPI
+                api = ZhetaokeAPI(
+                    self.config.get("appkey", ""),
+                    "",
+                    self.config.get("pid", "")
+                )
+                sid = api.auto_get_sid()
+                if sid:
+                    self.config["sid"] = sid
+                    self.save_config(silent=True)
+                    self.root.after(0, lambda: self.log(f"   ✅ SID已自动获取并保存: {sid[:8]}..."))
+                    self.root.after(0, lambda: self._refresh_auth_status_ui())
+                else:
+                    self.root.after(0, lambda: self.log("   ⚠️ SID自动获取失败，请确认已完成授权"))
+                    self.root.after(0, lambda: self.log("      如果刚授权完，等几分钟后再点「测试淘宝API」"))
+            except Exception as e:
+                self.root.after(0, lambda: self.log(f"   ⚠️ SID自动获取异常: {e}"))
+        threading.Thread(target=_do, daemon=True).start()
 
     def _refresh_auth_status_ui(self):
         """更新授权状态显示（上次授权日期 + 过期提醒）"""
@@ -457,9 +497,21 @@ class FadanApp:
         self._refresh_auth_status_ui()
         messagebox.showinfo("授权成功", "已记录本次授权日期为今天。30天内有效，到期前软件会提醒你。")
 
+    def _sync_quick_switch(self, config_key, var_obj):
+        """快捷开关同步：监听页的快捷开关改了 → 同步到config + 配置页对应变量"""
+        val = bool(var_obj.get())
+        self.config[config_key] = val
+        self.save_config(silent=True)
+        # 同步配置页的对应变量
+        if config_key == "monitor_forward_original_when_unparsed" and hasattr(self, "var_monitor_orig"):
+            self.var_monitor_orig.set(val)
+        elif config_key == "forward_at_all" and hasattr(self, "var_forward_at_all"):
+            self.var_forward_at_all.set(val)
+        self.log(f"⚙️ 快捷开关已更新：{config_key} = {'开' if val else '关'}")
+
     def refresh_all(self):
         """刷新全局：① 先保存当前输入框内容  ② 重新从 config.json 加载  ③ 刷新所有 Tab 的控件值
-        场景：在折淘客网页改了 SID、在 config.json 手动改了配置后，点这个让软件读到最新值。
+        场景：在config.json手动改了配置后，点这个让软件读到最新值。
         """
         # 先保存当前 UI 上的输入（避免用户改了没保存就刷新丢掉）
         try:
@@ -496,9 +548,8 @@ class FadanApp:
             except Exception:
                 pass
 
-        # 配置页 - 折淘客
+        # 配置页 - 淘宝联盟（SID已去掉，自动获取）
         _set_entry("entry_appkey", "appkey")
-        _set_entry("entry_sid", "sid")
         _set_entry("entry_pid", "pid")
         # 配置页 - NapCat
         _set_entry("entry_napcat_host", "napcat_host", "127.0.0.1")
@@ -542,6 +593,11 @@ class FadanApp:
             pass
         # @全体成员转发
         _set_var("var_forward_at_all", "forward_at_all", True)
+        # 快捷开关同步（监听页）
+        _set_var("var_quick_forward_orig", "monitor_forward_original_when_unparsed", False)
+        _set_var("var_quick_at_all", "forward_at_all", True)
+        # 口令符号
+        _set_entry("entry_tkl_symbol", "tkl_symbol", "￥")
 
         self.log("🔄 全局刷新完成：已从 config.json 重新加载所有配置项到界面")
 
@@ -1135,6 +1191,30 @@ class FadanApp:
                       corner_radius=8
                       ).pack(side="left", padx=5)
         
+        # 快捷开关行（紧跟按钮，让用户一眼看到）
+        quick_switch_row = ctk.CTkFrame(btn_card, fg_color="white")
+        quick_switch_row.pack(fill="x", padx=15, pady=(0, 10))
+
+        self.var_quick_forward_orig = ctk.BooleanVar(
+            value=self.config.get("monitor_forward_original_when_unparsed", False))
+        ctk.CTkCheckBox(quick_switch_row,
+                        text="🔀 未识别也转发（没淘口令/京东链接的纯文字消息也转发到目标群）",
+                        variable=self.var_quick_forward_orig,
+                        font=("", 10), text_color="#5D4E37",
+                        command=lambda: self._sync_quick_switch("monitor_forward_original_when_unparsed",
+                                                                 self.var_quick_forward_orig)
+                        ).pack(side="left", padx=(0, 20))
+
+        self.var_quick_at_all = ctk.BooleanVar(
+            value=self.config.get("forward_at_all", True))
+        ctk.CTkCheckBox(quick_switch_row,
+                        text="📣 跟随@全体成员",
+                        variable=self.var_quick_at_all,
+                        font=("", 10), text_color="#5D4E37",
+                        command=lambda: self._sync_quick_switch("forward_at_all",
+                                                                 self.var_quick_at_all)
+                        ).pack(side="left")
+        
         # 监听状态
         self.lbl_mon_status = ctk.CTkLabel(btn_card, 
                                             text="监听状态: 已停止  （填好源群和目标群，点上方绿色大按钮即可开始）",
@@ -1164,35 +1244,39 @@ class FadanApp:
         scroll_frame = ctk.CTkScrollableFrame(page, fg_color="#FDF6EC")
         scroll_frame.pack(fill="both", expand=True)
         
-        # 折淘客配置卡片
+        # 淘宝联盟配置卡片
         ztk_card = ctk.CTkFrame(scroll_frame, fg_color="white", corner_radius=12,
                                 border_width=1, border_color="#E5E5E5")
         ztk_card.pack(fill="x", padx=10, pady=(5, 15))
         
-        ctk.CTkLabel(ztk_card, text="🔗 折淘客 API 配置",
+        ctk.CTkLabel(ztk_card, text="🔗 淘宝联盟 配置",
                      font=("", 13, "bold"), text_color="#5D4E37").pack(padx=15, pady=(12, 10), anchor="w")
         
         # AppKey
-        self._create_config_row(ztk_card, "AppKey：", "entry_appkey", 
+        self._create_config_row(ztk_card, "AppKey：", "entry_appkey",
                                self.config["appkey"], 500)
-        
-        # SID
-        self._create_config_row(ztk_card, "SID(授权ID)：", "entry_sid", 
-                               self.config["sid"], 500)
-        
-        # PID
+
+        # PID + 口令符号 同一行
         pid_row = ctk.CTkFrame(ztk_card, fg_color="white")
         pid_row.pack(fill="x", padx=15, pady=5)
-        ctk.CTkLabel(pid_row, text="PID：", width=120, anchor="w").pack(side="left")
+        ctk.CTkLabel(pid_row, text="淘宝联盟PID：", width=120, anchor="w").pack(side="left")
         self.entry_pid = ctk.CTkEntry(pid_row, fg_color="#F9FAFB",
-                                      border_color="#E5E7EB")
+                                      border_color="#E5E7EB",
+                                      placeholder_text="mm_xxx_xxx_xxx")
         self.entry_pid.pack(side="left", fill="x", expand=True, padx=(5, 10))
         self.entry_pid.insert(0, self.config["pid"])
+        
+        # 口令符号设置
+        ctk.CTkLabel(pid_row, text="口令符号：", width=70, anchor="e").pack(side="left")
+        self.entry_tkl_symbol = ctk.CTkEntry(pid_row, width=50, fg_color="#F9FAFB",
+                                              border_color="#E5E7EB")
+        self.entry_tkl_symbol.pack(side="left", padx=(5, 10))
+        self.entry_tkl_symbol.insert(0, self.config.get("tkl_symbol", "￥"))
         
         # 授权按钮
         btn_row = ctk.CTkFrame(pid_row, fg_color="white")
         btn_row.pack(side="right", padx=5)
-        ctk.CTkButton(btn_row, text="🔗 授权淘宝联盟", width=140, height=32,
+        ctk.CTkButton(btn_row, text="去授权", width=80, height=32,
                       fg_color="#F97316", hover_color="#EA580C",
                       command=self.open_zhetaoke_auth,
                       corner_radius=8).pack(side="left", padx=3)
@@ -1207,7 +1291,7 @@ class FadanApp:
         self.lbl_auth_status.pack(padx=15, pady=5, anchor="w")
         
         ctk.CTkLabel(ztk_card,
-                     text="* SID在折淘客->授权管理页面查看；PID在淘宝联盟推广位查看；淘宝联盟授权每30天需更新一次",
+                     text="* PID在淘宝联盟后台「推广位管理」查看；授权每30天需更新一次（点「去授权」即可）",
                      text_color="#9CA3AF", font=("", 9)).pack(padx=15, pady=(0, 12), anchor="w")
         
         # NapCat配置卡片
@@ -1259,39 +1343,37 @@ class FadanApp:
         self._create_config_row(napcat_card, "Token(可选)：", "entry_napcat_token", 
                                self.config["napcat_token"], 500)
         
-        # 京东联盟配置卡片
+        # 京东联盟配置卡片（精简版：只填联盟ID即可）
         jd_card = ctk.CTkFrame(scroll_frame, fg_color="white", corner_radius=12,
                                border_width=1, border_color="#E5E5E5")
         jd_card.pack(fill="x", padx=10, pady=(0, 15))
         
-        ctk.CTkLabel(jd_card, text="🛒 京东联盟 API 配置（可选）",
+        ctk.CTkLabel(jd_card, text="🛒 京东联盟 配置（推荐：只填联盟ID即可）",
                      font=("", 13, "bold"), text_color="#5D4E37").pack(padx=15, pady=(12, 5), anchor="w")
         ctk.CTkLabel(jd_card, 
-                     text="* 没填也能用：京东商品会自动识别+转发，但用的是京东商品直链（不跟单、无佣金）",
-                     text_color="#9CA3AF", font=("", 9), wraplength=700).pack(padx=15, pady=(0, 10), anchor="w")
-        
-        self._create_config_row(jd_card, "京东AppKey：", "entry_jd_app_key", 
-                               self.config.get("jd_app_key", ""), 500)
-        self._create_config_row(jd_card, "京东AppSecret：", "entry_jd_app_secret", 
-                               self.config.get("jd_app_secret", ""), 500)
-        
-        # 联盟ID和推广位
+                     text="✅ 简易用法：在京粉/京东联盟后台「联盟ID管理」复制你的联盟ID（一串数字），填进下面输入框就行，无需再申请AppKey/推广位。\n"
+                          "ℹ️ 留空也能用：京东商品仍会识别+原样转发，但推广链接是商品直链（无佣金）。",
+                     text_color="#9CA3AF", font=("", 9), wraplength=700, justify="left").pack(padx=15, pady=(0, 10), anchor="w")
+
+        # 联盟ID（唯一必填）
         jd_row = ctk.CTkFrame(jd_card, fg_color="white")
-        jd_row.pack(fill="x", padx=15, pady=5)
-        ctk.CTkLabel(jd_row, text="联盟ID(UnionId)：", width=120, anchor="w").pack(side="left")
-        self.entry_jd_union_id = ctk.CTkEntry(jd_row, width=200, fg_color="#F9FAFB",
-                                               border_color="#E5E7EB")
-        self.entry_jd_union_id.pack(side="left", padx=(5, 20))
+        jd_row.pack(fill="x", padx=15, pady=(0, 12))
+        ctk.CTkLabel(jd_row, text="联盟ID (UnionId)：", width=130, anchor="w",
+                     text_color="#374151", font=("", 10, "bold")).pack(side="left")
+        self.entry_jd_union_id = ctk.CTkEntry(jd_row, width=260, fg_color="#F9FAFB",
+                                               border_color="#E5E7EB",
+                                               placeholder_text="例：1000000123")
+        self.entry_jd_union_id.pack(side="left", padx=(5, 0))
         self.entry_jd_union_id.insert(0, self.config.get("jd_union_id", ""))
-        
-        ctk.CTkLabel(jd_row, text="推广位PositionId：", width=110, anchor="e").pack(side="left")
-        self.entry_jd_position_id = ctk.CTkEntry(jd_row, width=150, fg_color="#F9FAFB",
-                                                   border_color="#E5E7EB")
-        self.entry_jd_position_id.pack(side="left", padx=(5, 20))
-        self.entry_jd_position_id.insert(0, self.config.get("jd_position_id", ""))
-        
-        self._create_config_row(jd_card, "站点SiteId(可选)：", "entry_jd_site_id", 
-                               self.config.get("jd_site_id", ""), 500)
+        ctk.CTkLabel(jd_row, text="  京粉/京东联盟 → 账户管理 → 联盟ID管理",
+                     text_color="#9CA3AF", font=("", 9)).pack(side="left")
+
+        # 隐藏的兼容字段（UI上不再显示，但从config读到值时仍保存在内存中，方便高级用户走官方API）
+        # jd_app_key / jd_app_secret / jd_position_id / jd_site_id
+        self.entry_jd_app_key     = type("_H", (), {"get": lambda: self.config.get("jd_app_key", "")})()
+        self.entry_jd_app_secret  = type("_H", (), {"get": lambda: self.config.get("jd_app_secret", "")})()
+        self.entry_jd_position_id = type("_H", (), {"get": lambda: self.config.get("jd_position_id", "")})()
+        self.entry_jd_site_id     = type("_H", (), {"get": lambda: self.config.get("jd_site_id", "")})()
         
         # 规则配置卡片
         rule_card = ctk.CTkFrame(scroll_frame, fg_color="white", corner_radius=12,
@@ -1452,7 +1534,7 @@ class FadanApp:
                       fg_color="#16A34A", hover_color="#15803D",
                       font=("", 10, "bold"), command=self.save_config,
                       corner_radius=8).pack(side="left", padx=5)
-        ctk.CTkButton(btn_row, text="🔗 测试折淘客API", width=120, height=38,
+        ctk.CTkButton(btn_row, text="🔗 测试淘宝API", width=120, height=38,
                       fg_color="#F3F4F6", hover_color="#E5E7EB",
                       text_color="#5D4E37", command=self.test_api,
                       corner_radius=8).pack(side="left", padx=5)
@@ -1710,14 +1792,14 @@ class FadanApp:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【一、前置准备（4步）】
 
-① 注册折淘客（免费，赚淘宝佣金必须有）
-   https://www.zhetaoke.com/
-   - 登录后「对接管理 → 应用管理」拿到 AppKey
-   - 「授权管理 → 淘客授权管理」绑定淘宝联盟账号，拿到 SID
+① 注册淘宝联盟账号（免费，赚淘宝佣金必须有）
+   - 登录淘宝联盟后台，获取 AppKey
+   - 点「去授权」完成授权（SID自动获取，无需手动填）
    - 绑定你的淘宝联盟 PID（格式 mm_xxx_xxx_xxx，在淘宝联盟后台「推广位管理」里拿）
+   - 点软件配置页「去授权」按钮完成30天授权
 
 ② （可选）申请京东联盟（赚京东佣金必须有）
-   union.jd.com → 个人免费申请 → 拿到 AppKey / AppSecret / 联盟ID / 推广位PositionId
+   京粉APP / union.jd.com → 联盟ID管理 → 复制你的联盟ID（一串数字）
 
 ③ 安装并启动 NapCat（抓群消息 + 发群消息的桥）
    https://github.com/NapNeko/NapCatQQ/releases
@@ -1733,10 +1815,10 @@ class FadanApp:
 【二、快速上手（5 步启动）】
 
 第 1 步：打开「⚙️ 配置」页
-       → 填折淘客 AppKey / SID / PID
+       → 填淘宝联盟 AppKey / PID
        → NapCat 地址（默认 127.0.0.1:3000）+ 有 Token 就填 Token
-       → （可选）京东联盟 4 项填完整
-       → 点【💾 保存配置】→ 依次点【🔗 测试折淘客API】【🤖 测试NapCat连接】【🧩 测试京东联盟API】
+       → （可选）京东联盟 填联盟ID即可
+       → 点【💾 保存配置】→ 依次点【🔗 测试淘宝API】【🤖 测试NapCat连接】【🧩 测试京东联盟API】
        → 必须全部 ✅ 再往下走，否则后面转链/发群都会失败。
 
 第 2 步：回到首页「👂 监听跟单」页
@@ -1800,10 +1882,10 @@ A: ① NapCat 没连上（先在配置页点 🤖测试NapCat连接）② 源群
    ③ 监听QQ号没填对（比如你填了上家QQ号，但这条是上家另一个小号发的 → 建议先留空测试）
 
 Q: 识别到了，但显示「淘宝转链失败」？
-A: 通常是折淘客三件套没对：AppKey错 / SID失效 / PID错，去折淘客后台重新授权一次。
+A: 通常是淘宝联盟凭证没对：AppKey错 / 授权过期 / PID错，重新点「去授权」即可。
 
 Q: 转发后群里的淘口令打开"商品失效"？
-A: SID/PID授权失效了。在折淘客后台「授权管理」重新授权一次淘宝联盟账号，
+A: 授权过期了。重新点「去授权」即可，软件会自动获取新的SID。
    然后保存 → 停止 → 重启监听。
 
 Q: 京东商品能识别，但转发后文案里写「无京东联盟KEY→直链无佣金」？
@@ -1887,8 +1969,8 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
         self._config_frame = fc       # 后面自动检测要用
         self._config_canvas = canvas  # 绑定 Tab 切换回调要用
 
-        # 折淘客
-        ttk.Label(fc, text="── 折淘客 API 配置 ──",
+        # 淘宝联盟
+        ttk.Label(fc, text="── 淘宝联盟 配置 ──",
                   font=("", 10, "bold")).grid(row=0, column=0, columnspan=4, sticky="w", pady=(10, 5), padx=5)
 
         ttk.Label(fc, text="AppKey:").grid(row=1, column=0, sticky="e", padx=5, pady=3)
@@ -1896,28 +1978,25 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
         self.entry_appkey.grid(row=1, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
         self.entry_appkey.insert(0, self.config["appkey"])
 
-        ttk.Label(fc, text="SID(授权ID):").grid(row=2, column=0, sticky="e", padx=5, pady=3)
-        self.entry_sid = ttk.Entry(fc, width=65)
-        self.entry_sid.grid(row=2, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
-        self.entry_sid.insert(0, self.config["sid"])
+        # SID已去掉，授权后自动获取
 
-        ttk.Label(fc, text="PID:").grid(row=3, column=0, sticky="e", padx=5, pady=3)
+        ttk.Label(fc, text="PID:").grid(row=2, column=0, sticky="e", padx=5, pady=3)
         entry_pid_frame = ttk.Frame(fc)
-        entry_pid_frame.grid(row=3, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+        entry_pid_frame.grid(row=2, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
         self.entry_pid = ttk.Entry(entry_pid_frame, width=55)
         self.entry_pid.pack(side="left")
         self.entry_pid.insert(0, self.config["pid"])
-        # 去折淘客授权按钮（PID 旁边，方便定时更新授权拿新 SID）
-        ttk.Button(entry_pid_frame, text="🔗 授权淘宝联盟（每30天更新）",
+        # 授权按钮
+        ttk.Button(entry_pid_frame, text="去授权（每30天更新）",
                    command=self.open_zhetaoke_auth).pack(side="left", padx=(8, 0))
         ttk.Button(entry_pid_frame, text="✅ 我已授权，标记今天",
                    command=self.mark_auth_today).pack(side="left", padx=(4, 0))
 
         # 授权状态显示（带过期提醒）
         self.lbl_auth_status = ttk.Label(fc, text="检测中...", foreground="#6B7280")
-        self.lbl_auth_status.grid(row=4, column=0, columnspan=4, sticky="w", padx=5, pady=(4, 2))
+        self.lbl_auth_status.grid(row=3, column=0, columnspan=4, sticky="w", padx=5, pady=(4, 2))
 
-        ttk.Label(fc, text="* SID在折淘客->授权管理页面查看；PID在淘宝联盟推广位查看；淘宝联盟授权每30天需更新一次",
+        ttk.Label(fc, text="* PID在淘宝联盟后台「推广位管理」查看；授权每30天需更新一次",
                   foreground="gray").grid(row=5, column=1, columnspan=3, sticky="w", padx=5)
 
         # NapCat（标题行 + 右上角状态灯 + 重新检测按钮）
@@ -2061,7 +2140,7 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
         frame_btns.grid(row=25, column=0, columnspan=4, pady=18)
         ttk.Button(frame_btns, text="💾 保存配置", command=self.save_config
                    ).pack(side="left", padx=10)
-        ttk.Button(frame_btns, text="🔗 测试折淘客API", command=self.test_api
+        ttk.Button(frame_btns, text="🔗 测试淘宝API", command=self.test_api
                    ).pack(side="left", padx=10)
         ttk.Button(frame_btns, text="🤖 测试NapCat连接", command=self.test_napcat
                    ).pack(side="left", padx=10)
@@ -3125,14 +3204,14 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【一、前置准备（4步）】
 
-① 注册折淘客（免费，赚淘宝佣金必须有）
-   https://www.zhetaoke.com/
-   - 登录后「对接管理 → 应用管理」拿到 AppKey
-   - 「授权管理 → 淘客授权管理」绑定淘宝联盟账号，拿到 SID
+① 注册淘宝联盟账号（免费，赚淘宝佣金必须有）
+   - 登录淘宝联盟后台，获取 AppKey
+   - 点「去授权」完成授权（SID自动获取，无需手动填）
    - 绑定你的淘宝联盟 PID（格式 mm_xxx_xxx_xxx，在淘宝联盟后台「推广位管理」里拿）
+   - 点软件配置页「去授权」按钮完成30天授权
 
 ② （可选）申请京东联盟（赚京东佣金必须有）
-   union.jd.com → 个人免费申请 → 拿到 AppKey / AppSecret / 联盟ID / 推广位PositionId
+   京粉APP / union.jd.com → 联盟ID管理 → 复制你的联盟ID（一串数字）
 
 ③ 安装并启动 NapCat（抓群消息 + 发群消息的桥）
    https://github.com/NapNeko/NapCatQQ/releases
@@ -3148,10 +3227,10 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
 【二、快速上手（5 步启动）】
 
 第 1 步：打开「⚙️ 参数设置」Tab
-       → 填折淘客 AppKey / SID / PID
+       → 填淘宝联盟 AppKey / PID
        → NapCat 地址（默认 127.0.0.1:3000）+ 有 Token 就填 Token
-       → （可选）京东联盟 4 项填完整
-       → 点【💾 保存配置】→ 依次点【🔗 测试折淘客API】【🤖 测试NapCat连接】【🧩 测试京东联盟API】
+       → （可选）京东联盟 填联盟ID即可
+       → 点【💾 保存配置】→ 依次点【🔗 测试淘宝API】【🤖 测试NapCat连接】【🧩 测试京东联盟API】
        → 必须全部 ✅ 再往下走，否则后面转链/发群都会失败。
 
 第 2 步：回到首页「👂 监听跟单」Tab
@@ -3215,10 +3294,10 @@ A: ① NapCat 没连上（先在设置页点 🤖测试NapCat连接）② 源群
    ③ 监听QQ号没填对（比如你填了上家QQ号，但这条是上家另一个小号发的 → 建议先留空测试）
 
 Q: 识别到了，但显示「淘宝转链失败」？
-A: 通常是折淘客三件套没对：AppKey错 / SID失效 / PID错，去折淘客后台重新授权一次。
+A: 通常是淘宝联盟凭证没对：AppKey错 / 授权过期 / PID错，重新点「去授权」即可。
 
 Q: 转发后群里的淘口令打开"商品失效"？
-A: SID/PID授权失效了。在折淘客后台「授权管理」重新授权一次淘宝联盟账号，
+A: 授权过期了。重新点「去授权」即可，软件会自动获取新的SID。
    然后保存 → 停止 → 重启监听。
 
 Q: 群{xx}发送失败？
@@ -3231,7 +3310,7 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
 【六、关于 KPI 数字的含义（非常实用）】
 
   • 运行 1 小时，「今日转发」没有任何增长？ 上家群里没发商品 / 或者你填的监听QQ号太窄。
-  • 「转链失败」在增长？立刻打开设置页重跑 🔗测试折淘客API / 🧩测试京东联盟API，凭证有问题。
+  • 「转链失败」在增长？立刻打开设置页重跑 🔗测试淘宝API / 🧩测试京东联盟API，凭证有问题。
   • 「命中违禁词」连续涨了好几十？要么上家在狂发违规内容（是好事，帮你过滤了），
     要么你的违禁词设太严了，回设置页改。
 
@@ -3288,7 +3367,20 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
     # =========================================================
     def test_api(self):
         self.save_config()
-        self.log("🔗 正在测试折淘客API...")
+        self.log("🔗 正在测试淘宝联盟API...")
+        # 如果没有SID，先自动获取
+        if not self.config.get("sid"):
+            self.log("   ℹ️ SID为空，正在自动获取...")
+            from zhetaoke_api import ZhetaokeAPI
+            api_tmp = ZhetaokeAPI(self.config["appkey"], "", self.config["pid"])
+            sid = api_tmp.auto_get_sid()
+            if sid:
+                self.config["sid"] = sid
+                self.save_config(silent=True)
+                self.log(f"   ✅ SID已自动获取: {sid[:8]}...")
+            else:
+                self.log("   ⚠️ SID自动获取失败，请先点「去授权」完成授权")
+                return
         api = ZhetaokeAPI(self.config["appkey"], self.config["sid"], self.config["pid"])
         products = api.get_products(page=1, page_size=5,
                                     commission_rate_start=self.config["min_commission"])
@@ -3301,9 +3393,14 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
             self.log("❌ API返回0条或请求失败。请检查 AppKey / 网络 / 是否完成授权。")
 
     def test_jd_union(self):
-        """测试京东联盟API（配置页按钮）：填了凭证走真实转链；没填则提示并演示"兜底链路"能正常工作"""
+        """测试京东联盟转链（配置页按钮）：
+        优先级：
+          1) 有完整 AppKey+AppSecret+推广位 → 走官方 API（追踪最稳妥）
+          2) 有联盟ID → 走 PID 拼接模式（推荐简易，填联盟ID就行）
+          3) 什么都没填 → 演示兜底直链（能转发但无佣金）
+        """
         self.save_config()
-        self.log("🧩 正在测试京东联盟API / 商品识别 & 转链兜底 ...")
+        self.log("🧩 正在测试京东商品识别 & 转链链路 ...")
         # 先测识别
         sample = "【京东自营】https://item.jd.com/100012345678.html 满199-60优惠券"
         from qq_monitor import QQMonitor
@@ -3311,41 +3408,62 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
         info = mon.parse_product_info(sample)
         self.log(f"   识别示例 -> 平台:{info.get('platform')}  类型:{info.get('type')}  值:{info.get('value')}")
 
-        # 没填 → 演示兜底链路（能识别+能转链，但need_key=True）
-        if not (self.config.get("jd_app_key") and self.config.get("jd_app_secret")
-                and self.config.get("jd_union_id") and (self.config.get("jd_position_id") or self.config.get("jd_site_id"))):
-            jd = JDUnionAPI() if JDUnionAPI is not None else None
-            if jd and info.get("value"):
-                r = jd.convert(info["value"])
-                self.log(f"   兜底转链(无key) -> 推广链接: {r.get('shorturl')}  need_key={r.get('need_key')}  err={str(r.get('error',''))[:60]}")
-            self.log("⚠️  未填写完整京东联盟 AppKey/AppSecret/UnionID/PositionId  → 已使用"
-                     "兜底直链(无佣金)。填写完整4项后，再点此按钮会调用真实联盟API生成你的推广链接。")
-            return
-
-        # 已填 → 走真实 API
         if JDUnionAPI is None:
             self.log("❌ 缺少 jd_union_api 模块，软件被异常裁剪，请重新覆盖源文件。")
             return
+
+        has_full = bool(
+            self.config.get("jd_app_key") and self.config.get("jd_app_secret")
+            and self.config.get("jd_union_id")
+            and (self.config.get("jd_position_id") or self.config.get("jd_site_id"))
+        )
+        has_union_only = bool(self.config.get("jd_union_id"))
+
+        # 构造转链实例（两种模式都兼容，传参全给进去，内层自己选路径）
         jd = JDUnionAPI(
-            app_key=self.config["jd_app_key"],
-            app_secret=self.config["jd_app_secret"],
-            union_id=self.config["jd_union_id"],
-            position_id=self.config["jd_position_id"],
+            app_key=self.config.get("jd_app_key", ""),
+            app_secret=self.config.get("jd_app_secret", ""),
+            union_id=self.config.get("jd_union_id", ""),
+            position_id=self.config.get("jd_position_id", ""),
             site_id=self.config.get("jd_site_id", ""),
         )
-        # 取一个真实 sku（京东 iPhone 15 经典sku，用于演示）
-        demo_sku = "100012043978"  # 公开存在的商品，不是推广
-        self.log(f"   用公开商品 sku={demo_sku} 调通用转链接口...")
-        r = jd.convert(demo_sku)
-        if r.get("click_url") and not r.get("need_key"):
-            self.log(f"✅ 京东联盟转链成功！")
-            self.log(f"   短链 shorturl : {r.get('shorturl')}")
-            self.log(f"   click_url     : {str(r.get('click_url'))[:120]}")
-            if r.get("error"):
-                self.log(f"   error说明     : {r['error']}")
+
+        # 拿一个公开存在的 sku 做演示（iPhone 15 经典 sku，仅用于展示转链结果）
+        demo_sku = "100012043978"
+        if has_full:
+            self.log(f"📡 模式：检测到完整凭证（AppKey/AppSecret/UnionID/推广位）→ 调用官方 API 转链 ...")
+        elif has_union_only:
+            self.log(f"🔗 模式：检测到联盟ID = {self.config['jd_union_id']} → 使用简易 PID 拼接模式（无需申请推广位/APIKey）")
         else:
-            self.log(f"❌ 京东联盟转链失败：{r.get('error') or '未返回推广链接'}")
-            self.log("   常见原因：① 4个信息填错 ② 应用未审核通过 ③ positionId 不属于你当前 unionId")
+            self.log(f"⚠️  未填写联盟ID → 演示兜底链路（能正常转发，但链接为商品直链，不走佣金跟单）")
+
+        self.log(f"   用公开商品 sku={demo_sku} 做转链演示 ...")
+        r = jd.convert(demo_sku)
+        mode = r.get("mode", "fallback")
+        mode_cn = {
+            "full_api": "✅ 官方API加密推广链接（佣金追踪最稳）",
+            "pid_only": "✅ PID拼接推广链接（简易模式，可正常跟单）",
+            "fallback": "⚠️  商品直链（未配置联盟ID，无佣金）",
+        }.get(mode, mode)
+
+        self.log(f"   转链模式 : {mode_cn}")
+        if r.get("click_url"):
+            self.log(f"   推广链接 : {r.get('shorturl') or r.get('click_url')}")
+            self.log(f"   need_key : {r.get('need_key')}")
+            if r.get("error") and mode == "fallback":
+                self.log(f"   提示     : {r.get('error')[:80]}")
+            elif r.get("error") and mode == "pid_only":
+                self.log(f"   说明     : {r.get('error')[:80]}")
+
+        if mode == "fallback":
+            self.log("💡 小提示：进入『京粉APP』或『京东联盟后台 → 账户管理 → 联盟ID管理』，")
+            self.log("   复制你的联盟ID（一串数字），粘贴进『联盟ID(UnionId)』输入框后保存，")
+            self.log("   再点一次本按钮即可切换到 PID 拼接有佣金模式 ✅")
+        elif mode == "pid_only":
+            self.log("🎉 配置完成！京东消息会自动转成带你联盟ID的推广链接，可正常拿佣金。")
+            self.log("   （如将来申请了官方API的AppKey/AppSecret/推广位，填到config.json里会自动升级为官方API模式）")
+        else:  # full_api
+            self.log("🎉 官方API模式运行正常，佣金追踪最稳妥。")
 
     # ================================================================
     # NapCat 状态灯 + 连接检测辅助方法（v1.0.3 新增）
@@ -3503,7 +3621,7 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
         entry_groups.configure(placeholder_text="群号1,群号2,群号3")
 
         # 删除按钮
-        def _make_remove(rf, idx_lbl=idx):
+        def _make_remove(rf, idx_lbl=index):
             def _do_remove():
                 try:
                     rf.destroy()
@@ -3806,15 +3924,13 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
         if not self.config.get("monitor_target_groups"):
             messagebox.showerror("参数缺失", "请填写【目标群号】（你自己的发单群）")
             return
-        # 现在淘宝/京东独立，淘宝不是必须有（监听场景可以只有京东）
-        has_tb = bool(self.config["appkey"] and self.config["sid"] and self.config["pid"])
-        has_jd = bool(self.config.get("jd_app_key") and self.config.get("jd_app_secret")
-                      and self.config.get("jd_union_id")
-                      and (self.config.get("jd_position_id") or self.config.get("jd_site_id")))
+        # 淘宝/京东独立，淘宝不是必须有（监听场景可以只有京东）
+        has_tb = bool(self.config["appkey"] and self.config["pid"])
+        has_jd = bool(self.config.get("jd_union_id"))
         if not (has_tb or has_jd):
             if not messagebox.askyesno(
                 "联盟凭证不完整",
-                "你还没填折淘客（淘宝）或京东联盟的完整凭证。\n\n"
+                "你还没填淘宝联盟或京东联盟的凭证。\n\n"
                 "软件仍能监听，但会用【兜底直链】转发（淘宝转链失败会跳过，京东商品无佣金）。\n\n"
                 "是否仍然启动监听？"
             ):
@@ -3974,8 +4090,8 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
                             num_iid = str(n)
                     except ValueError:
                         pass
-            if num_iid and self.config["appkey"] and self.config["sid"] and self.config["pid"]:
-                self.monitor_log_write(f"🔗 淘宝转链: 用 num_iid={num_iid} 调折淘客 ...")
+            if num_iid and self.config["appkey"] and self.config["pid"]:
+                self.monitor_log_write(f"🔗 淘宝转链: 用 num_iid={num_iid} 转链中 ...")
                 api = ZhetaokeAPI(self.config["appkey"], self.config["sid"], self.config["pid"])
                 c = api.convert_link(num_iid)
                 if c:
@@ -3985,12 +4101,13 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
                     if url:
                         self.monitor_log_write(f"   推广链接: {url[:120]}")
                     # 顺便输出文案
-                    gen = CopyGenerator(template_id=self.config.get("template_id", 1))
+                    gen = CopyGenerator(template_id=self.config.get("template_id", 1),
+                                        tkl_symbol=self.config.get("tkl_symbol", "￥"))
                     self.monitor_log_write("   文案预览:\n" + gen.generate({"title": ""}, c))
                 else:
-                    self.monitor_log_write("❌ 转链失败，请检查 SID / PID 授权状态")
+                    self.monitor_log_write("❌ 转链失败，请检查授权状态（点「去授权」更新）")
             else:
-                self.monitor_log_write("ℹ️ 没拿到淘宝 num_iid 或折淘客凭证未填写 → 不做转链")
+                self.monitor_log_write("ℹ️ 没拿到淘宝 num_iid 或凭证未填写 → 不做转链")
             return
 
         # ---- 京东：转链（无 key 走兜底）----
@@ -4013,7 +4130,8 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
             else:
                 self.monitor_log_write("✅ 京东联盟转链成功！推广链接: " + (r.get("shorturl") or r.get("click_url") or "")[:120])
             # 文案预览
-            gen = CopyGenerator(template_id=self.config.get("template_id", 1))
+            gen = CopyGenerator(template_id=self.config.get("template_id", 1),
+                                tkl_symbol=self.config.get("tkl_symbol", "￥"))
             self.monitor_log_write("   文案预览:\n" + gen.generate({}, r, raw_text=info.get("raw_text", "")))
             return
 
@@ -4466,10 +4584,10 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
                     pass
 
         converted = {}
-        if num_iid and self.config["appkey"] and self.config["sid"] and self.config["pid"]:
+        if num_iid and self.config["appkey"] and self.config["pid"]:
             converted = api.convert_link(num_iid)
             if not converted:
-                self.monitor_log_write("⚠️ 淘宝转链失败，跳过本次（通常是SID/PID未授权或商品受保护）")
+                self.monitor_log_write("⚠️ 淘宝转链失败，跳过本次（通常是未授权或商品受保护）")
                 self._inc_kpi("kpi_convert_fail", 1)
                 return
 
@@ -4489,7 +4607,7 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
                                      {"segments": segments}))
         else:
             product_ctx = {}
-            if num_iid and self.config["appkey"] and self.config["sid"] and self.config["pid"]:
+            if num_iid and self.config["appkey"] and self.config["pid"]:
                 detail = api.get_product_detail(num_iid)
                 if isinstance(detail, dict) and detail:
                     product_ctx.update(detail)
@@ -4515,7 +4633,8 @@ A: 京东联盟 4 个字段没填完整。填完保存配置，停止监听再�
 
     def _monitor_loop(self):
         api = ZhetaokeAPI(self.config["appkey"], self.config["sid"], self.config["pid"])
-        gen = CopyGenerator(template_id=self.config.get("template_id", 1))
+        gen = CopyGenerator(template_id=self.config.get("template_id", 1),
+                            tkl_symbol=self.config.get("tkl_symbol", "￥"))
 
         # 京东联盟（有key才生效；没key也能兜底）
         jd = None
