@@ -5,9 +5,9 @@
 #             git push origin v1.0.1
 # 效果：
 #   1. GitHub 免费开一台 Windows 服务器
-#   2. 装 Python 3.11 + requests + Pillow + PyInstaller
+#   2. 装 Python 3.11 + CustomTkinter + websocket-client + requests + Pillow + PyInstaller
 #   3. 按跟你本地「打包成exe.bat」完全一致的参数打 EXE
-#      （带粉小猪图标 · 带 assets/ · 8个业务模块 hidden-import）
+#      （带粉小猪图标 · 带 assets/ · 11个业务模块 hidden-import）
 #   4. 自动创建 Release → 上传 EXE + config.json + 使用说明.txt
 #   5. 用户端软件打开时「检查更新」会自动发现这个 tag，
 #      下载新 EXE 覆盖旧的 → 完成在线升级 ✅
@@ -35,14 +35,14 @@ jobs:
           python-version: '3.11'
 
       # ================== 3. 安装依赖 ==================
-      - name: 安装依赖（requests + Pillow + PyInstaller，国内加速源）
+      - name: 安装依赖（CustomTkinter + websocket-client + requests + Pillow + PyInstaller，国内加速源）
         run: |
           python -m pip install --upgrade pip
-          pip install requests pillow pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install customtkinter websocket-client requests pillow pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
 
       # ================== 4. 打包 EXE ==================
       # 注意：和本地「打包成exe.bat」使用的参数 100% 一致，避免云端打包和本地打包行为不一致
-      - name: 打包 EXE（粉小猪图标 + assets + 8个hidden-import + onefile + windowed）
+      - name: 打包 EXE（粉小猪图标 + assets + 11个hidden-import + onefile + windowed + collect-all customtkinter）
         run: |
           pyinstaller --noconfirm --clean --noupx `
             --onefile --windowed `
@@ -56,6 +56,10 @@ jobs:
             --hidden-import=jd_union_api `
             --hidden-import=auto_updater `
             --hidden-import=license `
+            --hidden-import=customtkinter `
+            --hidden-import=websocket `
+            --hidden-import=concurrent.futures `
+            --collect-all customtkinter `
             --collect-submodules tkinter `
             main.py
 
@@ -103,7 +107,17 @@ jobs:
             "monitor_send_image": $true,
             "github_owner": "${{ github.repository_owner }}",
             "github_repo": "${{ github.event.repository.name }}",
-            "auto_check_update": $true
+            "auto_check_update": $true,
+            "last_auth_date": "",
+            "auto_cleanup_enabled": $false,
+            "cleanup_interval_minutes": 60,
+            "cleanup_max_age_hours": 24,
+            "forward_at_all": $true,
+            "forward_mode": "original",
+            "scheduled_tasks": [],
+            "monitor_use_websocket": $true,
+            "multi_send_enabled": $false,
+            "sender_accounts": []
           }
           "@
             $cfg | Out-File -Encoding utf8 dist\config.json
@@ -171,13 +185,26 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: 🐷 猪儿虫发单软件 ${{ github.ref_name }}
           body: |
-            ## 自动构建版本 ${{ github.ref_name }}
+            ## 🐷 猪儿虫发单软件 ${{ github.ref_name }} 发布
 
-            ### 这一版本包含什么
-            - 方案B：精简跟单版（删除了原榜单发单功能，只保留监听+转链+转发核心）
+            ### v1.0.6 新功能（多账号 + 速度翻倍）
+            - **💌 多账号并发发送**：支持5~6个QQ号同时发，每个号配独立的目标群。配置页里的「💌 多账号并发发送」表格填写：昵称 / NapCat端口(3001~3006) / Token(可选) / 目标群号。点「🧪 测试全部账号连接」一键检查所有号是否在线。
+            - **⚡ WebSocket 实时监听**（比原来的3秒轮询快10~30倍）：默认开启，NapCat有消息立刻推送到软件，不用等3秒轮询。连不上自动回退HTTP轮询，完全不影响。
+            - **转链一次 + 并发分发**：主群消息只接收一次、折淘客只转链一次，同时用所有 NapCat 号并发发到各自的群。上家发消息到你的群发群整体压缩到 1 秒内完成。
+            - **✅ 完全向后兼容**：勾选「启用多账号」关闭时，软件行为和旧版本完全一致（单NapCat端口 + monitor_target_groups 字段），旧用户零感知升级。
+
+            ### v1.0.5 新功能
+            - **原样转发模式（默认）**：保留上家消息的原始文字和图片，仅替换转链链接。上家带几张图片，目标群就发几张，跟上家发的一模一样。
+            - **模板转发模式**：保留旧版模板格式化文案转发方式，可在【监听跟单】Tab自由切换。
+            - **⏰ 定时发送**：新增定时发送Tab，支持创建定时任务，按设定时间自动发送文字+本地图片到指定QQ群。支持单次/每天/每周/每月重复。
+            - **@全体成员过滤**：可开关控制上家@全体成员时是否跟随转发。
+            - **缓存清理**：自动/手动清理QQ图片视频缓存，带清理日志。
+
+            ### 功能说明
+            - 方案B：精简跟单版（监听+转链+转发核心）
             - 标题：🐷 猪儿虫发单软件
             - 图标：粉小猪 + 红色斗篷
-            - UI：顶部 KPI 条 + 启动监听大绿按钮 + 状态灯联动 + 违禁词/关键词替换
+            - 5个Tab：监听跟单 / ⚙️配置 / 🗑️缓存清理 / ⏰定时发送 / 📖帮助
 
             ### 升级方法
             - **已经安装并正在用的同学**：直接打开软件 → 点「⚙️ 配置」页 → 点「🔄 检查更新」，软件自动下载升级，**不用**手动下本页附件。
@@ -186,7 +213,7 @@ jobs:
             ### 附件说明
             - `猪儿虫发单软件.exe`：主程序（免Python · 带粉小猪图标 · 单文件绿色版）
             - `config.json`：配置文件模板（首次使用按模板填你的折淘客 / NapCat / 京东联盟账号）
-            - `使用说明.txt`：4 步上手 + 返利校验 + 常见问题（忘了怎么用就打开）
+            - `使用说明.txt`：4 步上手 + 返利校验 + 常见问题
 
           files: |
             dist/猪儿虫发单软件.exe
